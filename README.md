@@ -8,9 +8,12 @@ Interactive web app for creating and editing bike routes on a map. Click to add 
 - Drag waypoints to move them, right-click to delete
 - Drag midpoint markers to insert new waypoints along the route
 - Routes follow actual roads and bike paths (BRouter trekking profile)
+- Start and finish are shown as distinct flag markers; the roles follow position in the list, so deleting the first waypoint promotes the second
 - Save and load routes (SQLite)
-- Import GPX files
-- Distance and estimated time display
+- Import GPX files (`trkpt`, `rtept` or `wpt`)
+- Export GPX for bike computer apps (Garmin Connect, iGPSPORT, Strava) — full routed geometry with elevation
+- Distance, and travel time based on a speed you set yourself (5–50 km/h, remembered in localStorage)
+- Elevation profile below the map: hover the chart to mark the matching spot on the route. Total ascent and descent are noise-filtered, since BRouter's SRTM elevations jitter by a few metres between neighbouring points
 
 ## Tech Stack
 
@@ -41,7 +44,9 @@ backend/           Express API (port 3001)
   src/index.js     Routes + BRouter proxy
   src/db.js        SQLite setup
 frontend/          Vite + React (port 5173)
-  src/components/  Map, RoutingControl, Sidebar
+  src/components/  Map, RoutingControl, Sidebar, ElevationProfile
+  src/elevation.ts Ascent/descent and chart downsampling
+  src/gpx.ts       GPX import and export
   src/types.ts     Shared TypeScript interfaces
 ```
 
@@ -56,7 +61,5 @@ frontend/          Vite + React (port 5173)
 
 ## Planned
 
-- GPX export
-- Elevation profile
 - User accounts
 - Mobile optimization

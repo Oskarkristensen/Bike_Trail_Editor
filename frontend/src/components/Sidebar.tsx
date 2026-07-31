@@ -1,41 +1,53 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
+import { parseGPX, sampleWaypoints } from '../gpx'
+import type { ElevationProfile } from '../elevation'
 import type { RouteInfo, SavedRoute } from '../types'
 
-const MAX_WAYPOINTS = 20
+const SPEED_KEY = 'bike-trail-editor:speed-kmh'
+const MIN_SPEED = 5
+const MAX_SPEED = 50
+// 20 km/t svarer omtrent til BRouters trekking-tempo, så tallet ikke hopper
+const DEFAULT_SPEED = 20
 
-function parseGPX(xml: string): { lat: number; lng: number }[] {
-  const doc = new DOMParser().parseFromString(xml, 'text/xml')
-  // Try <trkpt>, then <rtept>, then <wpt>
-  let points = doc.querySelectorAll('trkpt')
-  if (points.length === 0) points = doc.querySelectorAll('rtept')
-  if (points.length === 0) points = doc.querySelectorAll('wpt')
-
-  const coords: { lat: number; lng: number }[] = []
-  points.forEach((pt) => {
-    const lat = parseFloat(pt.getAttribute('lat') || '')
-    const lng = parseFloat(pt.getAttribute('lon') || '')
-    if (!isNaN(lat) && !isNaN(lng)) coords.push({ lat, lng })
-  })
-  return coords
+function clampSpeed(kmh: number): number {
+  return Math.min(MAX_SPEED, Math.max(MIN_SPEED, kmh))
 }
 
-function sampleWaypoints(coords: { lat: number; lng: number }[]): { lat: number; lng: number }[] {
-  if (coords.length <= MAX_WAYPOINTS) return coords
-  const result: { lat: number; lng: number }[] = [coords[0]]
-  const step = (coords.length - 1) / (MAX_WAYPOINTS - 1)
-  for (let i = 1; i < MAX_WAYPOINTS - 1; i++) {
-    result.push(coords[Math.round(i * step)])
+// Accepterer dansk decimalkomma; null betyder "ikke et brugbart tal"
+function parseSpeed(value: string): number | null {
+  const trimmed = value.trim().replace(',', '.')
+  if (trimmed === '') return null
+  const parsed = Number(trimmed)
+  return Number.isFinite(parsed) ? parsed : null
+}
+
+function loadSpeed(): number {
+  try {
+    const raw = localStorage.getItem(SPEED_KEY)
+    const parsed = raw === null ? NaN : Number(raw)
+    return Number.isFinite(parsed) ? clampSpeed(parsed) : DEFAULT_SPEED
+  } catch {
+    // localStorage kan være blokeret (privat browsing, strenge cookie-indstillinger)
+    return DEFAULT_SPEED
   }
-  result.push(coords[coords.length - 1])
-  return result
 }
 
 interface SidebarProps {
   routeInfo: RouteInfo | null
+  /** null når ruten ikke har højdedata — så vises stigning/fald slet ikke */
+  elevation: ElevationProfile | null
+  routeError: string | null
+  showElevation: boolean
+  onToggleElevation: () => void
   onClearRoute: () => void
-  onSaveRoute: (name: string) => void
+  onSaveRoute: (name: string) => Promise<void>
   onLoadRoute: (route: SavedRoute) => void
   onImportGPX: (waypoints: { lat: number; lng: number }[]) => void
+  onExportGPX: (name: string) => void
+}
+
+function errorMessage(err: unknown, fallback: string): string {
+  return err instanceof Error && err.message ? err.message : fallback
 }
 
 function formatDistance(meters: number): string {
@@ -52,54 +64,129 @@ function formatTime(seconds: number): string {
   return `${h}t ${m}m`
 }
 
-export default function Sidebar({ routeInfo, onClearRoute, onSaveRoute, onLoadRoute, onImportGPX }: SidebarProps) {
+// BRouters egen tidsmodel bruges ikke — tiden følger den hastighed brugeren sætter
+function travelSeconds(meters: number, speedKmh: number): number {
+  return (meters * 3.6) / speedKmh
+}
+
+export default function Sidebar({ routeInfo, elevation, routeError, showElevation, onToggleElevation, onClearRoute, onSaveRoute, onLoadRoute, onImportGPX, onExportGPX }: SidebarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>([])
   const [showSaveDialog, setShowSaveDialog] = useState(false)
   const [routeName, setRouteName] = useState('')
+  const [showExportDialog, setShowExportDialog] = useState(false)
+  const [exportName, setExportName] = useState('')
+  const [isSaving, setIsSaving] = useState(false)
+  const [actionError, setActionError] = useState<string | null>(null)
+  // To states: speed er det tiden regnes ud fra, speedInput er hvad der står i feltet.
+  // Feltet må gerne være midlertidigt ugyldigt mens man skriver.
+  const [speed, setSpeed] = useState(loadSpeed)
+  const [speedInput, setSpeedInput] = useState(() => String(loadSpeed()))
+
+  useEffect(() => {
+    try {
+      localStorage.setItem(SPEED_KEY, String(speed))
+    } catch {
+      // Kan ikke gemmes — hastigheden virker stadig i denne session
+    }
+  }, [speed])
+
+  const handleSpeedChange = (value: string) => {
+    setSpeedInput(value)
+    const parsed = parseSpeed(value)
+    if (parsed !== null && parsed >= MIN_SPEED && parsed <= MAX_SPEED) {
+      setSpeed(parsed)
+    }
+  }
+
+  // Ryd op når feltet forlades: tomt eller uden for interval snapper tilbage
+  const handleSpeedBlur = () => {
+    const parsed = parseSpeed(speedInput)
+    const next = parsed === null ? speed : clampSpeed(parsed)
+    setSpeed(next)
+    setSpeedInput(String(next))
+  }
 
   const fetchRoutes = useCallback(async () => {
-    const res = await fetch('/api/routes')
-    if (res.ok) setSavedRoutes(await res.json())
+    try {
+      const res = await fetch('/api/routes')
+      if (!res.ok) throw new Error(`HTTP ${res.status}`)
+      setSavedRoutes(await res.json())
+    } catch (err) {
+      setActionError(errorMessage(err, 'Kunne ikke hente gemte ruter'))
+    }
   }, [])
 
   useEffect(() => { fetchRoutes() }, [fetchRoutes])
 
-  const handleSave = () => {
-    if (!routeName.trim()) return
-    onSaveRoute(routeName.trim())
-    setRouteName('')
-    setShowSaveDialog(false)
-    // Refresh list after short delay for DB write
-    setTimeout(fetchRoutes, 200)
+  const handleSave = async () => {
+    const name = routeName.trim()
+    if (!name || isSaving) return
+
+    setIsSaving(true)
+    setActionError(null)
+    try {
+      await onSaveRoute(name)
+      setRouteName('')
+      setShowSaveDialog(false)
+      await fetchRoutes()
+    } catch (err) {
+      setActionError(errorMessage(err, 'Kunne ikke gemme ruten'))
+    } finally {
+      setIsSaving(false)
+    }
+  }
+
+  const handleExport = () => {
+    const name = exportName.trim()
+    if (!name) return
+    setActionError(null)
+    try {
+      onExportGPX(name)
+      setExportName('')
+      setShowExportDialog(false)
+    } catch (err) {
+      setActionError(errorMessage(err, 'Kunne ikke eksportere ruten'))
+    }
   }
 
   const handleDelete = async (id: number) => {
-    await fetch(`/api/routes/${id}`, { method: 'DELETE' })
-    fetchRoutes()
+    setActionError(null)
+    try {
+      const res = await fetch(`/api/routes/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error(`Kunne ikke slette ruten (HTTP ${res.status})`)
+      await fetchRoutes()
+    } catch (err) {
+      setActionError(errorMessage(err, 'Kunne ikke slette ruten'))
+    }
   }
 
   const handleFileImport = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0]
     if (!file) return
+    setActionError(null)
     const reader = new FileReader()
     reader.onload = () => {
       const coords = parseGPX(reader.result as string)
       if (coords.length < 2) {
-        alert('Kunne ikke finde nok punkter i GPX-filen')
+        setActionError('Kunne ikke finde nok punkter i GPX-filen')
         return
       }
       onImportGPX(sampleWaypoints(coords))
     }
+    reader.onerror = () => setActionError('Kunne ikke læse GPX-filen')
     reader.readAsText(file)
     // Reset så samme fil kan importeres igen
     e.target.value = ''
   }
 
+  const visibleError = routeError ?? actionError
+
   return (
     <aside className="sidebar">
       <section className="sidebar-section">
         <h2>Rute</h2>
+        {visibleError && <p className="sidebar-error">{visibleError}</p>}
         {routeInfo ? (
           <>
             <div className="stat-grid">
@@ -108,51 +195,45 @@ export default function Sidebar({ routeInfo, onClearRoute, onSaveRoute, onLoadRo
                 <span className="stat-label">Distance</span>
               </div>
               <div className="stat">
-                <span className="stat-value">{formatTime(routeInfo.time)}</span>
-                <span className="stat-label">Estimeret tid</span>
+                <span className="stat-value">{formatTime(travelSeconds(routeInfo.distance, speed))}</span>
+                <span className="stat-label">Tid ved {speed} km/t</span>
               </div>
+              {elevation && (
+                <>
+                  <div className="stat">
+                    <span className="stat-value">{Math.round(elevation.ascent)} m</span>
+                    <span className="stat-label">Stigning</span>
+                  </div>
+                  <div className="stat">
+                    <span className="stat-value">{Math.round(elevation.descent)} m</span>
+                    <span className="stat-label">Fald</span>
+                  </div>
+                </>
+              )}
               <div className="stat">
                 <span className="stat-value">{routeInfo.waypointCount}</span>
                 <span className="stat-label">Waypoints</span>
               </div>
             </div>
 
-            <div className="sidebar-actions">
-              {showSaveDialog ? (
-                <div className="save-dialog">
-                  <input
-                    type="text"
-                    placeholder="Rutenavn..."
-                    value={routeName}
-                    onChange={(e) => setRouteName(e.target.value)}
-                    onKeyDown={(e) => e.key === 'Enter' && handleSave()}
-                    autoFocus
-                  />
-                  <div className="save-dialog-buttons">
-                    <button className="btn btn-primary" onClick={handleSave}>
-                      Gem
-                    </button>
-                    <button className="btn btn-secondary" onClick={() => setShowSaveDialog(false)}>
-                      Annullér
-                    </button>
-                  </div>
-                </div>
-              ) : (
-                <button className="btn btn-primary" onClick={() => setShowSaveDialog(true)}>
-                  Gem rute
-                </button>
-              )}
-              <button className="btn btn-secondary" disabled>
-                Eksportér GPX
-              </button>
-              <button className="btn btn-danger" onClick={onClearRoute}>
-                Ryd rute
-              </button>
-            </div>
+            <label className="speed-control">
+              <span className="speed-control-label">Hastighed</span>
+              {/* type="text", ikke "number" — ingen op/ned-pile, og scrollhjulet
+                  kan ikke ændre værdien. Klampningen sker i handleSpeedBlur. */}
+              <input
+                type="text"
+                inputMode="decimal"
+                value={speedInput}
+                onChange={(e) => handleSpeedChange(e.target.value)}
+                onBlur={handleSpeedBlur}
+              />
+              <span className="speed-control-unit">km/t</span>
+            </label>
           </>
         ) : (
           <p className="sidebar-hint">Klik på kortet for at starte en rute</p>
         )}
+
         <input
           ref={fileInputRef}
           type="file"
@@ -160,13 +241,72 @@ export default function Sidebar({ routeInfo, onClearRoute, onSaveRoute, onLoadRo
           style={{ display: 'none' }}
           onChange={handleFileImport}
         />
-        <button
-          className="btn btn-secondary"
-          style={{ marginTop: routeInfo ? 0 : 12 }}
-          onClick={() => fileInputRef.current?.click()}
-        >
-          Importér GPX
-        </button>
+
+        {/* Knapkolonnen ligger uden for routeInfo-betingelsen, så importknappen
+            også er tilgængelig når kortet er tomt */}
+        <div className="sidebar-actions">
+          {showSaveDialog ? (
+            <div className="save-dialog">
+              <input
+                type="text"
+                placeholder="Rutenavn..."
+                value={routeName}
+                onChange={(e) => setRouteName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') void handleSave() }}
+                autoFocus
+              />
+              <div className="save-dialog-buttons">
+                <button className="btn btn-primary" onClick={() => void handleSave()} disabled={isSaving}>
+                  {isSaving ? 'Gemmer...' : 'Gem'}
+                </button>
+                <button className="btn btn-secondary" onClick={() => setShowSaveDialog(false)} disabled={isSaving}>
+                  Annullér
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button className="btn btn-primary" onClick={() => setShowSaveDialog(true)} disabled={!routeInfo}>
+              Gem rute
+            </button>
+          )}
+          {showExportDialog ? (
+            <div className="save-dialog">
+              <input
+                type="text"
+                placeholder="Navn til cykelcomputeren..."
+                value={exportName}
+                onChange={(e) => setExportName(e.target.value)}
+                onKeyDown={(e) => { if (e.key === 'Enter') handleExport() }}
+                autoFocus
+              />
+              <div className="save-dialog-buttons">
+                <button className="btn btn-primary" onClick={handleExport}>
+                  Eksportér
+                </button>
+                <button className="btn btn-secondary" onClick={() => setShowExportDialog(false)}>
+                  Annullér
+                </button>
+              </div>
+            </div>
+          ) : (
+            <button className="btn btn-secondary" onClick={() => setShowExportDialog(true)} disabled={!routeInfo}>
+              Eksportér GPX
+            </button>
+          )}
+          <button className="btn btn-secondary" onClick={() => fileInputRef.current?.click()}>
+            Importér GPX
+          </button>
+          {/* Kun vejen tilbage: panelet lukkes med sit eget kryds, så to knapper
+              til samme ting ville stå og skifte plads i kolonnen */}
+          {elevation && !showElevation && (
+            <button className="btn btn-secondary" onClick={onToggleElevation}>
+              Vis højdeprofil
+            </button>
+          )}
+          <button className="btn btn-danger" onClick={onClearRoute} disabled={!routeInfo}>
+            Ryd rute
+          </button>
+        </div>
       </section>
 
       <section className="sidebar-section">

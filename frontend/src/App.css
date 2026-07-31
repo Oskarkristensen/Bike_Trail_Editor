@@ -29,6 +29,15 @@
   overflow: hidden;
 }
 
+/* Kort med højdeprofil under. min-width: 0 så kortet må krympe i flex-rækken
+   — uden den presser kortets indhold sidebaren sammen. */
+.map-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+}
+
 /* Sidebar */
 .sidebar {
   width: 280px;
@@ -58,12 +67,58 @@
   font-size: 0.9rem;
 }
 
+.sidebar-error {
+  background: #fff5f5;
+  border: 1px solid #ffc9c9;
+  border-radius: 4px;
+  color: #c92a2a;
+  font-size: 0.85rem;
+  line-height: 1.4;
+  margin-bottom: 12px;
+  padding: 8px 10px;
+  word-break: break-word;
+}
+
 /* Stats grid */
 .stat-grid {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 12px;
-  margin-bottom: 16px;
+  margin-bottom: 12px;
+}
+
+/* Hastighed — tiden i stat-gridet regnes ud fra denne værdi */
+.speed-control {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.speed-control-label {
+  font-size: 0.8rem;
+  color: #495057;
+  flex: 1;
+}
+
+.speed-control input {
+  width: 64px;
+  padding: 6px 8px;
+  border: 1px solid #ced4da;
+  border-radius: 6px;
+  font-size: 0.9rem;
+  text-align: right;
+  outline: none;
+}
+.speed-control input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.speed-control-unit {
+  font-size: 0.8rem;
+  color: #868e96;
+  width: 32px;
 }
 
 .stat {
@@ -88,6 +143,7 @@
   display: flex;
   flex-direction: column;
   gap: 8px;
+  margin-top: 12px;
 }
 
 .btn {
@@ -126,7 +182,7 @@
   color: #dc3545;
   border: 1px solid #dc3545;
 }
-.btn-danger:hover {
+.btn-danger:hover:not(:disabled) {
   background: #dc3545;
   color: white;
 }
@@ -211,15 +267,251 @@
   color: #dc3545;
 }
 
-/* Midpoint drag markers */
+/* --- Højdeprofil ---
+   Ligger under kortet i .map-main og har fast højde: panelet skal ikke
+   kunne æde kortet, og kortet skal ikke kunne klemme grafen væk. */
+.elevation-panel {
+  flex-shrink: 0;
+  background: #fff;
+  border-top: 1px solid #dee2e6;
+  padding: 8px 12px 4px;
+  /* Leaflets panes ligger på z-index op til 800 — tooltip'en skal ovenpå */
+  position: relative;
+  z-index: 1000;
+}
+
+.elevation-header {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 2px;
+}
+
+.elevation-header h2 {
+  font-size: 0.85rem;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: #6c757d;
+}
+
+.elevation-summary {
+  display: flex;
+  gap: 12px;
+  font-size: 0.85rem;
+  font-weight: 600;
+  flex: 1;
+}
+
+.elevation-ascent {
+  color: #c2410c;
+}
+
+.elevation-descent {
+  color: #2563eb;
+}
+
+.elevation-range {
+  color: #868e96;
+  font-weight: 500;
+}
+
+.elevation-close {
+  background: none;
+  border: none;
+  color: #adb5bd;
+  font-size: 1.2rem;
+  line-height: 1;
+  cursor: pointer;
+  padding: 0 4px;
+}
+.elevation-close:hover {
+  color: #212529;
+}
+
+.elevation-chart {
+  position: relative;
+  /* SVG'et er inline og ville ellers få et par px linjehøjde under sig */
+  line-height: 0;
+}
+
+.elevation-chart svg {
+  display: block;
+  touch-action: none;
+}
+
+.elevation-grid {
+  stroke: #e9ecef;
+  stroke-width: 1;
+}
+
+.elevation-tick {
+  fill: #868e96;
+  font-size: 10px;
+  line-height: normal;
+}
+
+.elevation-line {
+  fill: none;
+  stroke: #2563eb;
+  stroke-width: 2;
+  stroke-linejoin: round;
+  stroke-linecap: round;
+}
+
+.elevation-cursor {
+  stroke: #f97316;
+  stroke-width: 1;
+  stroke-dasharray: 3 3;
+}
+
+.elevation-cursor-dot {
+  fill: #f97316;
+  stroke: #fff;
+  stroke-width: 2;
+}
+
+/* Følger musen vandret; transform centrerer boblen over markøren */
+.elevation-tooltip {
+  position: absolute;
+  top: 0;
+  transform: translateX(-50%);
+  display: flex;
+  gap: 6px;
+  align-items: baseline;
+  background: rgba(33, 37, 41, 0.92);
+  color: #fff;
+  border-radius: 4px;
+  padding: 3px 8px;
+  font-size: 0.75rem;
+  line-height: 1.3;
+  white-space: nowrap;
+  pointer-events: none;
+}
+
+.elevation-tooltip span {
+  color: #ced4da;
+}
+
+/* --- Kortmarkører ---
+   Tre typer med hver sit signal:
+   flag        = start / slut
+   fyldt cirkel = et rigtigt waypoint
+   hul cirkel   = træk mig for at indsætte et nyt waypoint
+
+   VIGTIGT: rod-elementet (.flag-marker / .waypoint-marker / .midpoint-marker)
+   tilhører Leaflet, som skriver en inline `transform: translate3d(...)` på det ved
+   hver positionsopdatering. Sæt aldrig transform eller transition: transform der —
+   så animeres hvert eneste skridt under et træk, og markøren halter efter musen.
+   Alt visuelt hører hjemme i det indre element.                                  */
+
+/* Start- og slutflag */
+.flag-marker {
+  position: relative;
+  cursor: grab;
+}
+.flag-marker:active {
+  cursor: grabbing;
+}
+
+/* Bærer udseende og hover-skalering, så Leaflets transform på roden er urørt */
+.flag-body {
+  position: absolute;
+  inset: 0;
+  transform-origin: 4px 38px; /* flagstangens fod — skalering må ikke flytte punktet */
+  transition: transform 0.15s;
+}
+.flag-marker:hover .flag-body {
+  transform: scale(1.15);
+}
+
+.flag-body .flag-pole {
+  position: absolute;
+  left: 2px;
+  bottom: 2px;
+  width: 3px;
+  height: 34px;
+  border-radius: 1px 1px 0 0;
+  background: #374151;
+}
+
+/* Prik ved stangens fod, så det præcise punkt er synligt */
+.flag-body::after {
+  content: '';
+  position: absolute;
+  left: 0;
+  bottom: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: #374151;
+  border: 1px solid rgba(255, 255, 255, 0.9);
+}
+
+.flag-body .flag-cloth {
+  position: absolute;
+  left: 5px;
+  top: 2px;
+  width: 21px;
+  height: 15px;
+  border: 1px solid rgba(0, 0, 0, 0.35);
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.25);
+}
+
+.flag-start .flag-cloth {
+  background: #16a34a;
+}
+
+/* Ternet målflag, tegnet med to forskudte gradient-lag — ingen billedfil */
+.flag-end .flag-cloth {
+  background-color: #fff;
+  background-image:
+    linear-gradient(45deg, #1f2937 25%, transparent 25%, transparent 75%, #1f2937 75%),
+    linear-gradient(45deg, #1f2937 25%, transparent 25%, transparent 75%, #1f2937 75%);
+  background-size: 7px 7px;
+  background-position: 0 0, 3.5px 3.5px;
+}
+
+/* Cirkel-markørerne. Prikken fylder hele rod-boksen — box-sizing: border-box
+   øverst i filen holder kanten indenfor, så ankerpunktet ikke flytter sig. */
+.waypoint-marker,
 .midpoint-marker {
+  cursor: grab;
+}
+.waypoint-marker:active,
+.midpoint-marker:active {
+  cursor: grabbing;
+}
+
+.marker-dot {
+  display: block;
+  width: 100%;
+  height: 100%;
+  border-radius: 50%;
+  transition: transform 0.15s, background 0.15s, opacity 0.15s;
+}
+
+/* Almindelige waypoints: fyldt = et rigtigt punkt */
+.waypoint-marker .marker-dot {
   background: #2563eb;
   border: 2px solid white;
-  border-radius: 50%;
-  cursor: grab;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
-.midpoint-marker:hover {
+.waypoint-marker:hover .marker-dot {
   background: #1d4ed8;
+  transform: scale(1.25);
+}
+
+/* Midpoint drag markers: hul + stiplet = "træk for at tilføje",
+   bevidst underordnet de fyldte waypoints */
+.midpoint-marker .marker-dot {
+  background: rgba(255, 255, 255, 0.9);
+  border: 2px dashed #2563eb;
+  opacity: 0.75;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
+}
+.midpoint-marker:hover .marker-dot {
+  background: #2563eb;
+  border-style: solid;
+  opacity: 1;
   transform: scale(1.3);
 }

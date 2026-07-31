@@ -2,24 +2,53 @@ import { useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 
 import { useMap } from 'react-leaflet'
 import L from 'leaflet'
 
-// Fix default marker icons (Leaflet + Vite bundler issue)
-delete (L.Icon.Default.prototype as unknown as Record<string, unknown>)._getIconUrl
-L.Icon.Default.mergeOptions({
-  iconUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon.png',
-  iconRetinaUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-icon-2x.png',
-  shadowUrl: 'https://unpkg.com/leaflet@1.9.4/dist/images/marker-shadow.png',
+// Alle markører er divIcons stylet i App.css — ingen billeder fra CDN
+
+const FLAG_SIZE: L.PointExpression = [30, 38]
+// Ankeret ligger ved flagstangens fod, ikke i midten, så flaget peger på det præcise punkt
+const FLAG_ANCHOR: L.PointExpression = [4, 38]
+// Alt visuelt ligger i .flag-body — rod-elementet tilhører Leaflets positionering
+const FLAG_HTML =
+  '<span class="flag-body"><span class="flag-pole"></span><span class="flag-cloth"></span></span>'
+
+const startIcon = L.divIcon({
+  className: 'flag-marker flag-start',
+  html: FLAG_HTML,
+  iconSize: FLAG_SIZE,
+  iconAnchor: FLAG_ANCHOR,
+})
+
+const endIcon = L.divIcon({
+  className: 'flag-marker flag-end',
+  html: FLAG_HTML,
+  iconSize: FLAG_SIZE,
+  iconAnchor: FLAG_ANCHOR,
+})
+
+const DOT_HTML = '<span class="marker-dot"></span>'
+
+const waypointIcon = L.divIcon({
+  className: 'waypoint-marker',
+  html: DOT_HTML,
+  iconSize: [16, 16],
+  iconAnchor: [8, 8],
 })
 
 const midpointIcon = L.divIcon({
   className: 'midpoint-marker',
+  html: DOT_HTML,
   iconSize: [14, 14],
   iconAnchor: [7, 7],
 })
 
-import type { RoutingControlHandle, RouteInfo } from '../types'
+// Coalesce bursts af redigeringer (fx flere hurtige højreklik) til ét BRouter-kald
+const ROUTE_DEBOUNCE_MS = 150
+
+import type { RoutingControlHandle, RouteInfo, RoutePoint } from '../types'
 
 interface RoutingControlProps {
   onRouteUpdate?: (info: RouteInfo | null) => void
+  onRouteError?: (message: string | null) => void
 }
 
 interface RouteState {
@@ -28,35 +57,53 @@ interface RouteState {
   midpointMarkers: L.Marker[]
   routeLine: L.Polyline | null
   routeCoords: L.LatLng[]  // full routed coordinates from BRouter
+  requestSeq: number       // stiger for hvert routing-kald; kun det nyeste må vinde
+  abortController: AbortController | null
+  debounceTimer: ReturnType<typeof setTimeout> | null
+  highlight: L.CircleMarker | null  // punktet højdeprofilen peger på
 }
 
-async function fetchRoute(waypoints: L.LatLng[]): Promise<{
+// c.alt er højden fra BRouter og kan mangle på ældre svar
+function toRoutePoints(coords: L.LatLng[]): RoutePoint[] {
+  return coords.map((c) => ({ lat: c.lat, lng: c.lng, ele: c.alt }))
+}
+
+async function fetchRoute(waypoints: L.LatLng[], signal: AbortSignal): Promise<{
   coords: L.LatLng[]
   distance: number
-  time: number
-} | null> {
-  if (waypoints.length < 2) return null
-
+}> {
   const wps = waypoints.map((wp) => ({ lat: wp.lat, lng: wp.lng }))
   const res = await fetch('/api/route', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ waypoints: wps }),
+    signal,
   })
 
-  if (!res.ok) return null
+  if (!res.ok) {
+    let detail = ''
+    try {
+      const body = await res.json()
+      if (typeof body?.error === 'string') detail = body.error.trim().slice(0, 200)
+    } catch {
+      // ikke-JSON fejlsvar — brug bare statuskoden
+    }
+    throw new Error(detail || `Routing fejlede (HTTP ${res.status})`)
+  }
+
   const geojson = await res.json()
   const feature = geojson.features?.[0]
-  if (!feature) return null
+  if (!feature) throw new Error('BRouter fandt ingen rute mellem punkterne')
 
+  // c[2] er højden i meter — bevares som L.LatLng.alt, så GPX-eksporten kan bruge den
   const coords = feature.geometry.coordinates.map(
-    (c: number[]) => L.latLng(c[1], c[0]),
+    (c: number[]) => L.latLng(c[1], c[0], c[2]),
   )
+  // Kun distancen bruges — tiden regnes ud fra brugerens hastighed i Sidebar
   const props = feature.properties || {}
   return {
     coords,
     distance: parseFloat(props['track-length'] || '0'),
-    time: parseFloat(props['total-time'] || '0'),
   }
 }
 
@@ -101,7 +148,7 @@ function findMidpointAlongPath(coords: L.LatLng[]): L.LatLng {
   return coords[coords.length - 1]
 }
 
-export default forwardRef<RoutingControlHandle, RoutingControlProps>(function RoutingControl({ onRouteUpdate }, ref) {
+export default forwardRef<RoutingControlHandle, RoutingControlProps>(function RoutingControl({ onRouteUpdate, onRouteError }, ref) {
   const map = useMap()
   const stateRef = useRef<RouteState>({
     waypoints: [],
@@ -109,30 +156,80 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
     midpointMarkers: [],
     routeLine: null,
     routeCoords: [],
+    requestSeq: 0,
+    abortController: null,
+    debounceTimer: null,
+    highlight: null,
   })
   const onRouteUpdateRef = useRef(onRouteUpdate)
   onRouteUpdateRef.current = onRouteUpdate
+  const onRouteErrorRef = useRef(onRouteError)
+  onRouteErrorRef.current = onRouteError
+
+  const cancelPending = useCallback(() => {
+    const state = stateRef.current
+    if (state.debounceTimer !== null) {
+      clearTimeout(state.debounceTimer)
+      state.debounceTimer = null
+    }
+    state.abortController?.abort()
+    state.abortController = null
+    // Invalidér svar fra kald der allerede er undervejs
+    state.requestSeq++
+  }, [])
+
+  // Punktet højdeprofilen peger på. Ligger uden for markør-systemet med vilje:
+  // det er ikke et waypoint, kan ikke trækkes, og må ikke kunne klikkes væk.
+  const highlightPoint = useCallback((point: { lat: number; lng: number } | null) => {
+    const state = stateRef.current
+    if (!point) {
+      state.highlight?.remove()
+      state.highlight = null
+      return
+    }
+    const latlng = L.latLng(point.lat, point.lng)
+    if (state.highlight) {
+      state.highlight.setLatLng(latlng)
+      return
+    }
+    state.highlight = L.circleMarker(latlng, {
+      radius: 7,
+      color: '#ffffff',
+      weight: 3,
+      fillColor: '#f97316',
+      fillOpacity: 1,
+      interactive: false,
+    }).addTo(map)
+  }, [map])
 
   const clearAll = useCallback(() => {
     const state = stateRef.current
+    cancelPending()
     state.markers.forEach((m) => m.remove())
     state.midpointMarkers.forEach((m) => m.remove())
     state.routeLine?.remove()
+    state.highlight?.remove()
     state.waypoints = []
     state.markers = []
     state.midpointMarkers = []
     state.routeLine = null
     state.routeCoords = []
-  }, [])
+    state.highlight = null
+  }, [cancelPending])
 
   useImperativeHandle(ref, () => ({
     clearRoute() {
       clearAll()
       onRouteUpdateRef.current?.(null)
+      onRouteErrorRef.current?.(null)
     },
     getWaypoints() {
       return stateRef.current.waypoints.map((wp) => ({ lat: wp.lat, lng: wp.lng }))
     },
+    getRouteCoords() {
+      return toRoutePoints(stateRef.current.routeCoords)
+    },
+    highlightPoint,
     loadWaypoints(waypoints: { lat: number; lng: number }[]) {
       clearAll()
       const state = stateRef.current
@@ -142,24 +239,30 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
         state.waypoints.push(latlng)
         state.markers.push(marker)
       })
-      updateRouteRef.current?.()
+      // Zoom til ruten — ellers bliver kortet stående hvor det var
+      if (state.waypoints.length > 0) {
+        map.fitBounds(L.latLngBounds(state.waypoints), { padding: [40, 40] })
+      }
+      onRouteErrorRef.current?.(null)
+      scheduleRouteUpdateRef.current?.()
     },
   }))
 
   // We need stable references to functions that reference each other
-  const updateRouteRef = useRef<() => Promise<void>>()
-  const insertWaypointRef = useRef<(index: number, latlng: L.LatLng) => void>()
-  const createWaypointMarkerRef = useRef<(latlng: L.LatLng) => L.Marker>()
+  const scheduleRouteUpdateRef = useRef<(() => void) | undefined>(undefined)
+  const insertWaypointRef = useRef<((index: number, latlng: L.LatLng) => void) | undefined>(undefined)
+  const createWaypointMarkerRef = useRef<((latlng: L.LatLng) => L.Marker) | undefined>(undefined)
 
   const createWaypointMarker = useCallback((latlng: L.LatLng): L.Marker => {
     const state = stateRef.current
-    const marker = L.marker(latlng, { draggable: true }).addTo(map)
+    // Rollen (start/slut/mellempunkt) sættes af applyMarkerRoles lige efter
+    const marker = L.marker(latlng, { draggable: true, icon: waypointIcon }).addTo(map)
 
     marker.on('dragend', () => {
       const idx = state.markers.indexOf(marker)
       if (idx >= 0) {
         state.waypoints[idx] = marker.getLatLng()
-        updateRouteRef.current?.()
+        scheduleRouteUpdateRef.current?.()
       }
     })
 
@@ -169,13 +272,26 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
         state.waypoints.splice(idx, 1)
         state.markers.splice(idx, 1)
         marker.remove()
-        updateRouteRef.current?.()
+        scheduleRouteUpdateRef.current?.()
       }
     })
 
     return marker
   }, [map])
   createWaypointMarkerRef.current = createWaypointMarker
+
+  // Start/slut er ikke en egenskab ved markøren, men ved dens plads i listen —
+  // derfor gentildeles rollerne efter hver ændring af waypoints
+  const applyMarkerRoles = useCallback(() => {
+    const state = stateRef.current
+    const last = state.markers.length - 1
+    state.markers.forEach((marker, i) => {
+      const isEndpoint = i === 0 || i === last
+      // i === 0 vinder, så et enkelt waypoint bliver start — ikke slut
+      marker.setIcon(i === 0 ? startIcon : i === last ? endIcon : waypointIcon)
+      marker.setZIndexOffset(isEndpoint ? 1000 : 0)
+    })
+  }, [])
 
   const clearMidpoints = useCallback(() => {
     const state = stateRef.current
@@ -206,13 +322,21 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
       const mid = L.marker(midCoord, {
         icon: midpointIcon,
         draggable: true,
-        opacity: 0.6,
       }).addTo(map)
 
-      mid.on('dragend', () => {
-        const newLatLng = mid.getLatLng()
-        insertWaypointRef.current?.(insertIndex, newLatLng)
-      })
+      // Både klik og træk skal indsætte et waypoint her. Leaflet starter først et drag
+      // efter 3 px bevægelse, så et kort, præcist klik giver aldrig 'dragend'.
+      // Kun den første af de to events vinder; markøren bygges om ved næste
+      // createMidpoints(), så flaget lever kun så længe denne markør gør.
+      let consumed = false
+      const insertHere = () => {
+        if (consumed) return
+        consumed = true
+        insertWaypointRef.current?.(insertIndex, mid.getLatLng())
+      }
+
+      mid.on('dragend', insertHere)
+      mid.on('click', insertHere)
 
       state.midpointMarkers.push(mid)
     }
@@ -224,19 +348,46 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
     const marker = createWaypointMarker(latlng)
     state.waypoints.splice(index, 0, latlng)
     state.markers.splice(index, 0, marker)
-    updateRouteRef.current?.()
+    scheduleRouteUpdateRef.current?.()
   }
 
-  updateRouteRef.current = async () => {
+  const dropRouteLine = useCallback(() => {
     const state = stateRef.current
-    const result = await fetchRoute(state.waypoints)
+    state.routeLine?.remove()
+    state.routeLine = null
+    state.routeCoords = []
+    // Markøren pegede på en rute der ikke findes længere
+    state.highlight?.remove()
+    state.highlight = null
+    clearMidpoints()
+  }, [clearMidpoints])
 
-    if (state.routeLine) {
-      state.routeLine.remove()
-      state.routeLine = null
+  const runRouteUpdate = useCallback(async () => {
+    const state = stateRef.current
+
+    // Nyt kald gør alle tidligere svar forældede
+    state.abortController?.abort()
+    const seq = ++state.requestSeq
+
+    if (state.waypoints.length < 2) {
+      state.abortController = null
+      dropRouteLine()
+      onRouteErrorRef.current?.(null)
+      onRouteUpdateRef.current?.(state.waypoints.length > 0
+        ? { distance: 0, waypointCount: state.waypoints.length, points: [] }
+        : null
+      )
+      return
     }
 
-    if (result) {
+    const controller = new AbortController()
+    state.abortController = controller
+
+    try {
+      const result = await fetchRoute(state.waypoints, controller.signal)
+      if (seq !== state.requestSeq) return  // et nyere kald har overhalet dette
+
+      state.routeLine?.remove()
       state.routeCoords = result.coords
       state.routeLine = L.polyline(result.coords, {
         color: '#2563eb',
@@ -244,20 +395,35 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
         opacity: 0.8,
       }).addTo(map)
 
+      onRouteErrorRef.current?.(null)
       onRouteUpdateRef.current?.({
         distance: result.distance,
-        time: result.time,
         waypointCount: state.waypoints.length,
+        points: toRoutePoints(result.coords),
       })
-    } else {
-      state.routeCoords = []
-      onRouteUpdateRef.current?.(state.waypoints.length > 0
-        ? { distance: 0, time: 0, waypointCount: state.waypoints.length }
-        : null
-      )
-    }
+      createMidpoints()
+    } catch (err) {
+      if (seq !== state.requestSeq) return  // afbrudt eller forældet — ignorér
 
-    createMidpoints()
+      dropRouteLine()
+      onRouteErrorRef.current?.(err instanceof Error ? err.message : 'Kunne ikke beregne rute')
+      onRouteUpdateRef.current?.({
+        distance: 0,
+        waypointCount: state.waypoints.length,
+        points: [],
+      })
+    }
+  }, [map, createMidpoints, dropRouteLine])
+
+  scheduleRouteUpdateRef.current = () => {
+    const state = stateRef.current
+    // Synkront, ikke inde i det debouncede kald — ellers halter ikonet efter klikket
+    applyMarkerRoles()
+    if (state.debounceTimer !== null) clearTimeout(state.debounceTimer)
+    state.debounceTimer = setTimeout(() => {
+      state.debounceTimer = null
+      void runRouteUpdate()
+    }, ROUTE_DEBOUNCE_MS)
   }
 
   const addWaypoint = useCallback((latlng: L.LatLng) => {
@@ -265,11 +431,16 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
     const marker = createWaypointMarker(latlng)
     state.waypoints.push(latlng)
     state.markers.push(marker)
-    updateRouteRef.current?.()
+    scheduleRouteUpdateRef.current?.()
   }, [createWaypointMarker])
 
   useEffect(() => {
     const onClick = (e: L.LeafletMouseEvent) => {
+      // Leaflet sætter .leaflet-marker-icon på alle markører (flag, waypoint, midpoint).
+      // Et klik på en af dem må aldrig lande som et nyt waypoint sidst i ruten — så ville
+      // det blive det nye mål. Markørerne har deres egne handlere.
+      const target = e.originalEvent?.target as Element | null
+      if (target?.closest?.('.leaflet-marker-icon')) return
       addWaypoint(e.latlng)
     }
     map.on('click', onClick)
@@ -278,7 +449,7 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
       map.off('click', onClick)
       clearAll()
     }
-  }, [map, addWaypoint])
+  }, [map, addWaypoint, clearAll])
 
   return null
 })
