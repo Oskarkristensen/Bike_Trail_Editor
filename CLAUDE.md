@@ -193,148 +193,192 @@ Ikke implementeret endnu:
 - Brugerkonti/login — planlagt i detaljer, se "Migreringsplan: brugerkonti" nedenfor
 - Mobiloptimering
 
-## Migreringsplan: brugerkonti (Neon Postgres + Neon Auth)
+## Migreringsplan: brugerkonti (Neon Postgres + eget login med invitationskode)
 
-**Status: planlagt, intet implementeret.** Skrevet 31. juli 2026. Alt i dette afsnit er
-research og beslutninger, ikke kode der findes. Læs det inden du begynder — flere af
-valgene er truffet for at undgå fælder der ikke er åbenlyse.
+**Status: fase 1 færdig (16. oktober 2026), fase 2–5 planlagt.** Afsnittene fra fase 2 og
+frem er beslutninger, ikke kode der findes. Læs dem inden du begynder — flere af valgene er
+truffet for at undgå fælder der ikke er åbenlyse.
+
+**Planen blev lavet om 16. okt. 2026: Neon Auth er droppet** til fordel for samme model
+som Oskars `food_waste_website` (offentligt repo): brugernavn + adgangskode i vores egen
+tabel, cookie-session i Postgres, og en invitationskode for at oprette sig. Grunde:
+- Oskar vil have **brugernavne, ikke e-mails**. Neon viser ikke Better Auths
+  username-plugin, så med Neon Auth var login e-mail (eventuelt falsk).
+- **Folk skal kunne oprette sig selv, men kun dem Oskar har givet koden.** Neon Auth kunne
+  kun "alle" eller "ingen — Oskar opretter dem i dashboardet".
+- Adgangskontrollen ligger i **vores kode**, ens på alle branches. Med Neon Auth var den en
+  dashboard-indstilling pr. branch, som skulle huskes på en hård tjekliste ved deploy.
+- Ingen Beta-afhængighed, ingen JWT/JWKS/`jose`, ingen tokens der udløber efter 15 min.
+- Prisen: **vi opbevarer selv adgangskoder.** Med bcrypt og rate limiting er det i orden
+  for et hobbyprojekt uden følsomme data — appen gemmer kun ruter.
 
 ### Udgangspunkt
 
-Appen skal hostes på **Render's gratis tier**, hvor filsystemet er flygtigt: `routes.db`
-bliver slettet ved hver deploy, og instansen lukker ned efter ~15 minutters inaktivitet.
-**SQLite kan derfor ikke bruges i produktion** — ikke fordi den er for lille, men fordi
-filen ikke overlever. Databasen flytter til **Neon** (serverless Postgres).
+Appen skal hostes på **Render's gratis tier**, hvor filsystemet er flygtigt og instansen
+lukker ned efter ~15 minutters inaktivitet. **SQLite kan derfor ikke bruges i produktion**
+— filen overlever ikke en deploy. Databasen er flyttet til **Neon** (serverless Postgres).
 
-Der er oprettet et Neon-projekt, **og Neon Auth er slået til** (31. juli 2026) — så
-`neon_auth`-skemaet med users og sessions findes allerede i databasen. Derudover er
-**intet sat op**: ingen af vores egne tabeller, ingen miljøvariabler, og intet i Render.
+Neon-projektet har **to branches: `main` (produktion) og `test` (lokal udvikling)**. Bevidst
+kun to — der kommer ikke en tredje. `routes`-tabellen er oprettet på **`test`**. **På
+`main` er der intet endnu** — hverken tabel eller noget i Render.
 
 ### Skridt der kræver dashboard-adgang (kan ikke gøres herfra)
 
-1. ~~Slå Neon Auth til~~ — **gjort.** Tilbage står kun at finde `NEON_AUTH_URL` i Neons
-   dashboard og lægge den i `backend/.env`. Den er offentlig — den må gerne stå i kode og
-   env-filer, og JWKS-endpointet under den er beregnet til at være frit tilgængeligt.
-2. **Kopiér den *pooled* connection string** (den med `-pooler` i værtsnavnet, ikke den
-   direkte) og tilføj `sslmode=require`. Læg den i `backend/.env` som `DATABASE_URL`.
-   **Den må aldrig i git eller i en chat.** `.env` er allerede gitignoreret.
-3. **Opret en Neon-branch `dev`** og peg den lokale backend på den. Auth-brugere klones med
-   branchen, så lokale testbrugere aldrig rammer produktionsdata.
-4. Ved deploy: `DATABASE_URL` og `NEON_AUTH_URL` som env vars i Render.
+1. ~~Opret branch og læg pooled connection string i `backend/.env`~~ — gjort (branch `test`).
+2. ~~Slå Neon Auth fra på begge branches~~ — gjort 16. okt. 2026. Verificeret på `test`:
+   den gamle auth-URL svarer 404, og databasen har kun skemaet `public` tilbage.
+   `NEON_AUTH_URL` er fjernet fra `.env` og `.env.example`. Støder du på et
+   `neon_auth`-skema eller en auth-URL, er det en rest — ikke noget der bruges.
+3. Ved deploy: se fase 5.
 
-### Fase 1 — SQLite → Postgres, uden auth
+Connection stringen er hemmelig: **aldrig i git eller i en chat.** Det samme gælder
+`SESSION_SECRET` og `INVITE_CODE`. Repoet er offentligt på GitHub.
 
-Selvstændig og testbar alene. **Efter fase 1 skal appen opføre sig præcis som nu.**
+### Fase 1 — SQLite → Postgres, uden auth — **færdig**
 
-- `better-sqlite3` ud, `pg` ind i `backend/package.json`.
-- `src/db.js` bliver en `Pool` med `connectionString: process.env.DATABASE_URL` og
-  `ssl: { rejectUnauthorized: true }`.
-- **better-sqlite3 er synkron, `pg` er asynkron.** De fire kaldsteder
-  (`src/index.js:68, 95, 104` plus skemaet i `db.js`) bliver til `await pool.query(...)`,
-  og de handlere der ikke allerede er `async`, skal være det — med try/catch, så en
-  databasefejl bliver til 500 og ikke en unhandled rejection der vælter processen.
-- Dialektforskelle: `?` → `$1`/`$2`, `INTEGER PRIMARY KEY AUTOINCREMENT` →
-  `GENERATED ALWAYS AS IDENTITY`, `datetime('now')` → `now()` med `timestamptz`, og
-  `result.lastInsertRowid` → `INSERT ... RETURNING id`.
-- `waypoints_json TEXT` kan blive `jsonb`. Ikke nødvendigt — vi laver ingen forespørgsler
-  ned i strukturen — men det giver validering af at indholdet faktisk er JSON.
-- **Skemaet flytter til en `schema.sql` med et `npm run db:init`-script** i stedet for DDL
-  ved hver opstart. Mod en serverless database er det spild at køre `CREATE TABLE IF NOT
-  EXISTS` ved hvert koldstart, og det gør det svært at se hvornår skemaet sidst ændrede sig.
-- Eksisterende ruter i `backend/routes.db` flyttes med et engangsscript, eller droppes.
-- **Backenden læser i dag slet ingen `.env`-fil** — der er hverken `dotenv` eller
-  `--env-file`, og `process.env.PORT` virker kun fordi den sættes på kommandolinjen. Det
-  skal på plads *først*, ellers er `DATABASE_URL` bare en fil ingen kigger i. Node 24 kan
-  selv, så ingen ny afhængighed: brug **`--env-file-if-exists=.env`** i `dev`- og
-  `start`-scriptet i `backend/package.json`. Varianten `-if-exists` er ikke pedanteri —
-  i Render kommer variablerne fra dashboardet, der findes ingen `.env`-fil, og `--env-file`
-  alene får processen til at fejle ved opstart.
-- **Læg en `backend/.env.example` i git** med tomme pladsholdere for `DATABASE_URL` og
-  `NEON_AUTH_URL`, så det fremgår hvilke variabler der kræves. Kun eksemplet — aldrig
-  rigtige værdier.
-- **Opdatér README.md og CLAUDE.md som en del af fasen.** README siger i dag "Database:
-  SQLite (better-sqlite3)" under Tech Stack, og Getting Started nævner ingen miljøvariabler.
-  Begge dele bliver forkerte i samme øjeblik fase 1 er kørt.
+Gennemført 16. oktober 2026 og testet mod `test`-branchen: gem, list og slet via API'et
+og fra browseren, 404 ved ukendt id, 400 ved ugyldigt id. Detaljerne der ikke er
+åbenlyse står under "Postgres-detaljer" i Arkitekturbeslutninger. Det gamle `routes.db`
+er slettet — den indeholdt kun én testrute, så intet blev migreret.
 
-### Fase 2 — auth-middleware i Express
+`better-sqlite3` er væk. `npm audit` er rent i root og frontend; i backend står 3 *high*
+tilbage i `braces` via `nodemon` → `chokidar`. Kun dev-afhængighed, kører aldrig i
+produktion. `npm audit fix --force` ville *nedgradere* nodemon til 1.14.10 — gør det ikke.
 
-Ren tilføjelse; ingen endpoints ændrer opførsel endnu.
+### Fase 2 — brugere, sessioner og login-endpoints i Express
 
-Frontenden henter tokenet med `authClient.getSession()` og sender det som
-`Authorization: Bearer <token>`. Backenden verificerer signaturen lokalt mod Neons
-offentlige nøgler — **ingen netværkskald pr. request**:
+Ren tilføjelse; ingen eksisterende endpoints ændrer opførsel endnu.
+
+**Afhængigheder:** `express-session`, `connect-pg-simple`, `bcryptjs`, `express-rate-limit`.
+`bcryptjs` frem for `bcrypt`, fordi den er ren JavaScript — ingen native build, samme
+grund til at vi var glade for at slippe af med `better-sqlite3`.
+
+**Skema** (i `schema.sql`, ikke ved opstart):
+```sql
+CREATE TABLE IF NOT EXISTS users (
+  id INTEGER GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  username TEXT NOT NULL UNIQUE CHECK (username = lower(username)),
+  password_hash TEXT NOT NULL,
+  created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
+```
+- `INTEGER` af samme grund som `routes.id`: `pg` leverer `BIGINT` som streng.
+- `CHECK (username = lower(username))` gør at "Oskar" og "oskar" ikke kan blive to
+  brugere, selv hvis normaliseringen i koden en dag glemmes.
+- **Sessionstabellen skal også i `schema.sql`**, ikke via `createTableIfMissing` som i
+  food waste. Hent definitionen fra `node_modules/connect-pg-simple/table.sql` og gør den
+  idempotent (`IF NOT EXISTS`). Tjek at den kører på Neons Postgres-version — filen er
+  gammel og har tidligere haft `WITH (OIDS=FALSE)`.
+
+**Endpoints** — JSON, ikke server-renderede formularer som i food waste, da frontenden er
+React:
+
+| Metode | Endpoint | Body | Svar |
+|---|---|---|---|
+| POST | `/api/auth/register` | `{ username, password, invite }` | 201 + `{ username }`, logget ind |
+| POST | `/api/auth/login` | `{ username, password }` | 200 + `{ username }` |
+| POST | `/api/auth/logout` | – | 200 |
+| GET | `/api/auth/me` | – | 200 + `{ username }` eller 401 |
 
 ```js
-const jose = require('jose');
-// Ét sæt på modulniveau: createRemoteJWKSet cacher selv nøglerne.
-// Bygger man det pr. request, hentes JWKS ved hvert kald.
-const JWKS = jose.createRemoteJWKSet(
-  new URL(`${process.env.NEON_AUTH_URL}/.well-known/jwks.json`)
-);
-const ISSUER = new URL(process.env.NEON_AUTH_URL).origin;
-
-async function requireUser(req, res, next) {
-  const token = (req.headers.authorization || '').replace(/^Bearer /, '');
-  if (!token) return res.status(401).json({ error: 'Login kræves' });
-  try {
-    const { payload } = await jose.jwtVerify(token, JWKS, { issuer: ISSUER });
-    req.userId = payload.sub;   // UUID-streng, ikke et tal
-    next();
-  } catch {
-    res.status(401).json({ error: 'Ugyldigt eller udløbet token' });
-  }
+function requireUser(req, res, next) {
+  if (!req.session?.userId) return res.status(401).json({ error: 'Login kræves' });
+  req.userId = req.session.userId;
+  next();
 }
 ```
 
-To ting der bider, hvis man ikke kender dem:
+**Beslutninger og forbedringer i forhold til food waste** — dér mangler de, så kopiér
+ikke derfra uden at læse dette:
 
-- **Tokens signeres med EdDSA (Ed25519).** Det gamle `jsonwebtoken`-bibliotek understøtter
-  ikke den algoritme — derfor `jose`. Vælg ikke bibliotek på vane.
-- **Access tokens lever kun 15 minutter.** Frontenden skal hente tokenet pr. kald via
-  `getSession()` (klienten cacher selv), ikke gemme det i en variabel ved app-start.
-  Gør man det sidste, virker appen i et kvarter og begynder så at give 401.
+- **`SESSION_SECRET` og `INVITE_CODE` er påkrævede; processen fejler ved opstart uden dem**,
+  som `DATABASE_URL` allerede gør i `db.js`. Food waste falder tilbage til
+  `'changeme'` og advarer kun — så kører produktionen med en kendt hemmelighed, og alle kan
+  forfalske en session.
+- **Invitationskoden sammenlignes med `crypto.timingSafeEqual`** (på SHA-256 af begge
+  strenge, så længderne er ens). En almindelig `!==` lækker via svartiden hvor mange tegn
+  der er rigtige.
+- **Rate limiting på `/api/auth/login` og `/api/auth/register`** (`express-rate-limit`,
+  fx 10 forsøg pr. 15 min pr. IP). Food waste har ingen, så både invitationskoden og
+  adgangskoder kan brute-forces. Standardlageret er i hukommelsen og nulstilles ved
+  genstart — fint med én Render-instans.
+- **`req.session.regenerate()` ved login og oprettelse** — nyt session-id når man logger
+  ind, så et id en angriber har plantet før login ikke bliver gyldigt (session fixation).
+- **try/catch i alle async-handlere.** Food waste har ingen i `/register`; i Express 4
+  vælter en databasefejl der hele processen. Vi kører Express 5, som fanger afviste
+  promises, men try/catch giver os stadig pæne fejlbeskeder. **Postgres-fejlkode `23505`
+  (unique violation) → 409 "Brugernavnet er taget"** — det fanger to der opretter samme
+  navn samtidig, hvor tjek-så-indsæt ikke gør.
+- **Validering på serveren**, ikke kun i HTML: brugernavn normaliseres (`trim`,
+  `toLowerCase`) og skal matche fx `^[a-z0-9_.-]{3,30}$`; adgangskode mindst 8 tegn.
+  Food waste har kun `minlength` i formularen.
+- **bcrypt cost 10.** `bcryptjs` er ren JS og langsommere end den native; højere cost
+  mærkes på Render's gratis CPU.
+- **Login svarer det samme ved ukendt bruger og forkert adgangskode** ("Forkert brugernavn
+  eller adgangskode"). Oprettelse afslører at et navn er taget — acceptabelt, da man skal
+  have koden for at nå så langt.
+- **Cookie:** `httpOnly` (standard), `sameSite: 'lax'`, `secure` i produktion, `maxAge`
+  30 dage. **`sameSite: 'lax'` er vores CSRF-beskyttelse** — browseren sender ikke
+  cookien med på POST-kald fra andre sites.
+- **En fælles kode, ikke en pr. person.** Skift `INVITE_CODE` for at lukke for nye
+  oprettelser. Det logger ikke eksisterende brugere ud — slet deres sessioner i
+  `session`-tabellen eller brugeren selv for det.
 
 ### Fase 3 — brugerejerskab på ruter
 
-- `routes.user_id TEXT NOT NULL` — `sub` er en **UUID-streng**, ikke et heltal — plus
-  index på `(user_id, created_at DESC)`, som er præcis den forespørgsel listen laver.
-- **Ingen foreign key til `neon_auth`-skemaet i første omgang.** De tabeller ejes og
-  administreres af Neon, og vores skema skal ikke bindes til noget vi ikke kontrollerer,
-  før det er bekræftet understøttet i den nuværende udgave. Konsekvens: oprydning ved
-  sletning af en bruger skal håndteres i kode.
+- `routes.user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE`, plus index på
+  `(user_id, created_at DESC)`, som er præcis den forespørgsel listen laver. **Nu hvor vi
+  ejer `users`-tabellen, er en foreign key i orden** — med Neon Auth var den fravalgt,
+  fordi Neon ejede tabellen. `CASCADE`: sletter man en bruger, forsvinder ruterne med.
+- **Tabellen er ikke længere tom** — Oskars "Test rute" (id 2) ligger på `test`. Slet den
+  eller tildel den en bruger, før `NOT NULL` tilføjes; ellers fejler migrationen.
 - Alle tre route-endpoints filtreres på `req.userId`. **`DELETE` skal have
   `WHERE id = $1 AND user_id = $2`** — filtrerer man kun listen, kan en bruger stadig
   slette andres ruter ved at gætte et id. Det er den klassiske fejl i netop dette skridt.
+- `/api/route` (BRouter-proxyen) får også `requireUser`.
 
 ### Fase 4 — frontend
 
-- `@neondatabase/auth` (React SPA-SDK'et), login-UI, Bearer-token på alle `/api/routes`-kald.
-- 401 skal håndteres i sidepanelet på linje med de øvrige fejlbeskeder — ellers ser en
-  udløbet session ud som en vilkårlig fejl.
+- Login- og opret-skærm (brugernavn, adgangskode, og invitationskode ved oprettelse).
+  `GET /api/auth/me` ved opstart afgør om den vises. Log ud-knap i sidepanelet.
+- **Ingen tokens i frontenden.** Cookien sendes automatisk med på kald til samme origin
+  (`fetch`'s standard er `credentials: 'same-origin'`). Lokalt sørger Vite-proxyen for at
+  `/api` er samme origin.
+- 401 fra et hvilket som helst kald → tilbage til login-skærmen, ikke en vilkårlig
+  fejlbesked i sidepanelet. Sessionen kan være slettet eller udløbet.
 
 ### Fase 5 — deploy
 
-- `DATABASE_URL` og `NEON_AUTH_URL` som env vars i Render.
-- **`cors()` er helt åben i dag** og skal låses til frontendens origin, før det bliver
-  offentligt tilgængeligt.
+- **Express serverer den byggede frontend** (`frontend/dist`) fra samme origin som API'et.
+  Det er det der gør cookie-login enkelt: ingen cross-site cookies, og **`cors()` kan
+  fjernes helt** i stedet for at låses til en origin. Den er helt åben i dag.
+- **`app.set('trust proxy', 1)`** — Render sætter en proxy foran appen og taler HTTP til
+  den. Uden denne linje tror Express at forbindelsen er usikker, og en `secure`-cookie
+  bliver aldrig sat: login "virker", men man er logget ud ved næste kald. Det samme gør
+  at rate limiting ser proxyens IP i stedet for brugerens og spærrer alle på én gang.
+- Kør `db:init` mod **`main`**.
+- Env vars i Render: `DATABASE_URL` (`main`'s pooled string med **`sslmode=verify-full`**),
+  `SESSION_SECRET` (lang tilfældig streng, fx `openssl rand -hex 32`), `INVITE_CODE`,
+  `NODE_ENV=production`.
+- **Bevis det efter deploy:** oprettelse med forkert kode skal give fejl, login skal
+  overleve et reload, og `/api/routes` uden cookie skal give 401.
 
-### Åbne beslutninger
+### Afgjorte beslutninger
 
-- **Skal `/api/route` (BRouter-proxyen) kræve login?** Ellers står den som en gratis
-  routing-proxy andre kan bruge på vores kvote. Anbefaling: ja — men det betyder at man
-  ikke kan lege med kortet uden at oprette sig.
-- **Hvad sker der med de nuværende gemte ruter?** Tildeles de en konto, eller startes der
-  forfra?
+- **`/api/route` kræver login** (16. okt. 2026). Ellers står den som en gratis
+  routing-proxy på vores kvote. Konsekvens: kortet kan ikke bruges uden login.
+- **Gamle SQLite-ruter: forfra.** `routes.db` blev slettet i fase 1.
+- **Eget login med invitationskode frem for Neon Auth** (16. okt. 2026) — se toppen af
+  afsnittet.
 
 ### Faldgruber der er værd at kende på forhånd
 
-- **Neon Auth er markeret Beta** (udgaven bygget på Better Auth, lanceret december 2025).
-  Fint til et hobbyprojekt, men det skal være et bevidst valg.
-- **Der findes to generationer af Neon Auth, og næsten alt man finder via Google handler
-  om den gamle.** Den tidligere udgave byggede på Stack Auth og synkroniserede brugere ind
-  i en `neon_auth.users_sync`-tabel — asynkront, med soft deletes og råd om `LEFT JOIN` og
-  forsigtighed med foreign keys. **Det gælder ikke her.** Den gamle tager ikke imod nye
-  brugere, og i den nye er databasen selv kilden til sandheden. Følg ikke de guides.
 - **Første kald efter en pause er langsomt.** Neon skalerer til nul, og Render's gratis
   tier lukker ned ved inaktivitet. Det er kosmetik, ikke en fejl — men det ligner en fejl.
 - **Brug den pooled connection string.** Den direkte er til migrationer og engangsjobs.
+- **Hvert API-kald læser sessionen fra Postgres** (én forespørgsel). Ubetydeligt her,
+  men det er grunden til at sessionstabellen har index på `expire` — connect-pg-simple
+  rydder udløbne sessioner op med den.
+- **`food_waste_website` har samme svagheder som listet under fase 2**, plus
+  `ssl: { rejectUnauthorized: false }` (intet certifikattjek). Den er i drift, så de
+  er værd at rette dér også.
