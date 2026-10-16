@@ -209,7 +209,7 @@ tabel, cookie-session i Postgres, og en invitationskode for at oprette sig. Grun
 - Adgangskontrollen ligger i **vores kode**, ens på alle branches. Med Neon Auth var den en
   dashboard-indstilling pr. branch, som skulle huskes på en hård tjekliste ved deploy.
 - Ingen Beta-afhængighed, ingen JWT/JWKS/`jose`, ingen tokens der udløber efter 15 min.
-- Prisen: **vi opbevarer selv adgangskoder.** Med bcrypt og rate limiting er det i orden
+- Prisen: **vi opbevarer selv adgangskoder.** Med bcrypt er det i orden
   for et hobbyprojekt uden følsomme data — appen gemmer kun ruter.
 
 ### Udgangspunkt
@@ -249,7 +249,7 @@ produktion. `npm audit fix --force` ville *nedgradere* nodemon til 1.14.10 — g
 
 Ren tilføjelse; ingen eksisterende endpoints ændrer opførsel endnu.
 
-**Afhængigheder:** `express-session`, `connect-pg-simple`, `bcryptjs`, `express-rate-limit`.
+**Afhængigheder:** `express-session`, `connect-pg-simple`, `bcryptjs`.
 `bcryptjs` frem for `bcrypt`, fordi den er ren JavaScript — ingen native build, samme
 grund til at vi var glade for at slippe af med `better-sqlite3`.
 
@@ -292,16 +292,22 @@ function requireUser(req, res, next) {
 ikke derfra uden at læse dette:
 
 - **`SESSION_SECRET` og `INVITE_CODE` er påkrævede; processen fejler ved opstart uden dem**,
-  som `DATABASE_URL` allerede gør i `db.js`. Food waste falder tilbage til
-  `'changeme'` og advarer kun — så kører produktionen med en kendt hemmelighed, og alle kan
-  forfalske en session.
-- **Invitationskoden sammenlignes med `crypto.timingSafeEqual`** (på SHA-256 af begge
-  strenge, så længderne er ens). En almindelig `!==` lækker via svartiden hvor mange tegn
-  der er rigtige.
-- **Rate limiting på `/api/auth/login` og `/api/auth/register`** (`express-rate-limit`,
-  fx 10 forsøg pr. 15 min pr. IP). Food waste har ingen, så både invitationskoden og
-  adgangskoder kan brute-forces. Standardlageret er i hukommelsen og nulstilles ved
-  genstart — fint med én Render-instans.
+  som `DATABASE_URL` allerede gør i `db.js`. Mest for at fejlen viser sig med det samme i
+  stedet for som en mystisk opførsel. Uden `INVITE_CODE` kan ingen oprette sig; en
+  manglende `SESSION_SECRET` er *ikke* farlig med vores opsætning (se næste punkt).
+- **`SESSION_SECRET` beskytter mindre end man skulle tro.** Den signerer kun cookien, og
+  cookien indeholder kun et tilfældigt session-id — login-tilstanden ligger i
+  `session`-tabellen. Kender en angriber hemmeligheden, kan de signere et vilkårligt id,
+  men id'et skal findes i tabellen for at give adgang, og det kan kun skaffes ved at stjæle
+  en indlogget brugers cookie. Hemmeligheden ville være kritisk med `cookie-session`, hvor
+  hele sessionen ligger i cookien. Det er ikke vores opsætning.
+- **Invitationskoden skal være lang og tilfældig** — fx `openssl rand -base64 15`
+  (20 tegn). Det er hele beskyttelsen mod at gætte den.
+- **Bevidst fravalgt (16. okt. 2026): rate limiting og `timingSafeEqual`.** Med en
+  tilfældig kode på 20 tegn er gætteri uoverkommeligt uden loft, og et timingangreb hen
+  over internettet er urealistisk mod en app som denne. Indsatsen står ikke mål med hvad
+  en angriber vinder: adgang til et routingkort og nogle cykelruter. Kommer der en dag
+  noget mere følsomt i appen, så genovervej.
 - **`req.session.regenerate()` ved login og oprettelse** — nyt session-id når man logger
   ind, så et id en angriber har plantet før login ikke bliver gyldigt (session fixation).
 - **try/catch i alle async-handlere.** Food waste har ingen i `/register`; i Express 4
@@ -354,12 +360,11 @@ ikke derfra uden at læse dette:
   fjernes helt** i stedet for at låses til en origin. Den er helt åben i dag.
 - **`app.set('trust proxy', 1)`** — Render sætter en proxy foran appen og taler HTTP til
   den. Uden denne linje tror Express at forbindelsen er usikker, og en `secure`-cookie
-  bliver aldrig sat: login "virker", men man er logget ud ved næste kald. Det samme gør
-  at rate limiting ser proxyens IP i stedet for brugerens og spærrer alle på én gang.
+  bliver aldrig sat: login "virker", men man er logget ud ved næste kald.
 - Kør `db:init` mod **`main`**.
 - Env vars i Render: `DATABASE_URL` (`main`'s pooled string med **`sslmode=verify-full`**),
-  `SESSION_SECRET` (lang tilfældig streng, fx `openssl rand -hex 32`), `INVITE_CODE`,
-  `NODE_ENV=production`.
+  `SESSION_SECRET` (lang tilfældig streng, fx `openssl rand -hex 32`), `INVITE_CODE`
+  (lang og tilfældig, se fase 2), `NODE_ENV=production`.
 - **Bevis det efter deploy:** oprettelse med forkert kode skal give fejl, login skal
   overleve et reload, og `/api/routes` uden cookie skal give 401.
 
@@ -379,6 +384,9 @@ ikke derfra uden at læse dette:
 - **Hvert API-kald læser sessionen fra Postgres** (én forespørgsel). Ubetydeligt her,
   men det er grunden til at sessionstabellen har index på `expire` — connect-pg-simple
   rydder udløbne sessioner op med den.
-- **`food_waste_website` har samme svagheder som listet under fase 2**, plus
-  `ssl: { rejectUnauthorized: false }` (intet certifikattjek). Den er i drift, så de
-  er værd at rette dér også.
+- **`food_waste_website` er vurderet og efterladt som den er** (16. okt. 2026). Den har
+  ingen rate limiting, en `'changeme'`-fallback for `SESSION_SECRET`, ingen try/catch i
+  `/register` og `rejectUnauthorized: false` — men den gemmer kun brugernavn og bcrypt-hash,
+  og en angriber vinder adgang til offentlige tilbudsdata. Fallbacken er harmløs af samme
+  grund som i fase 2 (sessioner ligger i Postgres). Dens `render.yaml` peger på en
+  Render-database, men den kører i virkeligheden på Neon — filen er forældet.
