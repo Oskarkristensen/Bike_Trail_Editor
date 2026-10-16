@@ -84,10 +84,12 @@ frontend/          Vite + React (port 5173)
 | POST | `/api/auth/logout` | Log out |
 | GET | `/api/auth/me` | Current user, or 401 |
 
-Logins are cookie sessions stored in Postgres.
+Logins are cookie sessions stored in Postgres. Every endpoint except `/api/health` and
+`/api/auth/*` requires a login and returns 401 otherwise. Saved routes belong to the user
+who created them; other users can neither see nor delete them.
 
 ## Planned
 
-- User accounts: the backend is in place, but routes are not yet tied to users and the
-  frontend has no login screen
+- Login screen. The backend requires a login, but the frontend has no way to log in
+  yet, so the app is not usable in the browser until this is done
 - Mobile optimization

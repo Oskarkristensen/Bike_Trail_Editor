@@ -64,7 +64,8 @@ linjen.
 - `POST /api/auth/logout`
 - `GET /api/auth/me` — `{ username }` eller 401
 
-Pr. fase 2 kræver ingen af de eksisterende endpoints login endnu — det kommer i fase 3.
+**Alt undtagen `/api/health` og `/api/auth/*` kræver login** (fase 3) og svarer ellers
+401. Ruterne er pr. bruger: man ser og sletter kun sine egne.
 
 ## Arkitekturbeslutninger
 
@@ -176,6 +177,15 @@ hvordan værktøjerne opfører sig, så det er værd at kende:
 - Baggrunden: deny-regler binder kun det navngivne værktøj, så Bash kunne læse de samme
   filer med `cat` eller `python3`. Hooken lukker det hul, fordi den ser kommandoen i stedet
   for værktøjsnavnet.
+- **Hooken udfolder `~` som shellen gør** — kun forrest i et ord og efterfulgt af `/` eller
+  ordets slutning. Indtil 16. okt. 2026 udfoldede den hvert `~`, så "~15 min" i en
+  commit-besked blev til `/Users/oskar15` og blev afvist, og det samme gjorde
+  `git log HEAD~3`. Ser du en afvisning med en sti der ikke giver mening, så tjek om
+  tekst i kommandoen er blevet læst som en sti. Testene ligger i
+  `.claude/hooks/project-scope.test.sh` (`bash .claude/hooks/project-scope.test.sh
+  .claude/hooks/project-scope.sh`) — kør dem efter enhver ændring af hooken. Bemærk at
+  testkommandoer med fx `~/Downloads` direkte i Bash bliver afvist af hooken selv; de
+  skal ligge i en fil.
 - Begge dele er værn mod uheld, ikke sikkerhedsgrænser — de ligger i filer der kan redigeres
   herfra. Slå fra med `"disableAllHooks": true` eller `/hooks`.
 
@@ -199,8 +209,9 @@ Færdigt:
 - Højdeprofil under kortet med stigning/fald i sidepanelet og markør på kortet ved hover
 
 Ikke implementeret endnu:
-- Brugerkonti/login — backend klar (fase 2), men intet er låst endnu og frontenden har
-  ingen login-skærm. Se "Migreringsplan: brugerkonti" nedenfor
+- Brugerkonti/login — backenden er færdig og låst (fase 2 og 3), men **frontenden har
+  ingen login-skærm endnu, så appen kan ikke bruges i browseren** — kortklik giver
+  "Login kræves". Det er forventet indtil fase 4. Se "Migreringsplan: brugerkonti" nedenfor
 - Mobiloptimering
 
 ## Migreringsplan: brugerkonti (Neon Postgres + eget login med invitationskode)
@@ -360,15 +371,26 @@ ikke derfra uden at læse dette:
   oprettelser. Det logger ikke eksisterende brugere ud — slet deres sessioner i
   `session`-tabellen eller brugeren selv for det.
 
-### Fase 3 — brugerejerskab på ruter
+### Fase 3 — brugerejerskab på ruter — **færdig**
+
+Gennemført 16. oktober 2026 og testet mod `test` med to brugere, A og B: uden login
+giver alle fire endpoints 401 (også BRouter-proxyen), mens `/api/health` er åben. B ser
+en tom liste, B's forsøg på at slette A's rute giver 404 og ruten består, og A kan slette
+den selv. `CASCADE` eftervist: sletning af B fjernede B's rute (1 → 0). Testbrugerne er
+slettet igen.
 
 - `routes.user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE`, plus index på
   `(user_id, created_at DESC)`, som er præcis den forespørgsel listen laver. **Nu hvor vi
   ejer `users`-tabellen, er en foreign key i orden** — med Neon Auth var den fravalgt,
   fordi Neon ejede tabellen. `CASCADE`: sletter man en bruger, forsvinder ruterne med.
-- **`routes` er tom på `test`** — Oskars "Test rute" (id 2) blev slettet 16. okt. 2026
-  netop for at `NOT NULL` kan tilføjes uden backfill. Tjek at den stadig er tom før
-  migrationen; ellers fejler den.
+- **Kolonnen tilføjes med `ALTER TABLE ... ADD COLUMN IF NOT EXISTS`, ikke i `CREATE
+  TABLE routes`.** Tabellen fandtes før brugerne, og `CREATE TABLE IF NOT EXISTS` springer
+  en eksisterende tabel helt over — kolonnen ville aldrig være kommet på `test`. Samme
+  sætning virker på en tom database (`main`), da den står efter `users` i `schema.sql`.
+- **`NOT NULL` fejler med vilje hvis der ligger ruter uden ejer.** `routes` var tom på
+  `test` (Oskars "Test rute" blev slettet først). På `main` er den tom fordi intet er
+  oprettet endnu.
+- **En andens rute giver 404, ikke 403** — set fra din konto findes den ikke.
 - Alle tre route-endpoints filtreres på `req.userId`. **`DELETE` skal have
   `WHERE id = $1 AND user_id = $2`** — filtrerer man kun listen, kan en bruger stadig
   slette andres ruter ved at gætte et id. Det er den klassiske fejl i netop dette skridt.

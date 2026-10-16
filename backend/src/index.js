@@ -29,8 +29,8 @@ function isValidWaypoint(wp) {
     && Number.isFinite(wp.lng) && wp.lng >= -180 && wp.lng <= 180;
 }
 
-// BRouter proxy
-app.post('/api/route', async (req, res) => {
+// BRouter proxy. Kræver login — ellers står den som en gratis routing-proxy på vores kvote
+app.post('/api/route', auth.requireUser, async (req, res) => {
   const { waypoints, profile = 'trekking' } = req.body || {};
 
   if (!Array.isArray(waypoints) || waypoints.length < 2) {
@@ -70,13 +70,15 @@ app.post('/api/route', async (req, res) => {
   }
 });
 
-// Saved routes CRUD
+// Saved routes CRUD — alle tre er låst til den indloggede brugers egne ruter.
 // waypoints_json er jsonb, så pg parser den selv — ingen JSON.parse her, og ingen
 // korrupte rækker at springe over: Postgres afviser ugyldig JSON ved INSERT.
-app.get('/api/routes', async (req, res) => {
+app.get('/api/routes', auth.requireUser, async (req, res) => {
   try {
     const { rows } = await pool.query(
-      'SELECT id, name, waypoints_json AS waypoints, created_at FROM routes ORDER BY created_at DESC'
+      `SELECT id, name, waypoints_json AS waypoints, created_at FROM routes
+       WHERE user_id = $1 ORDER BY created_at DESC`,
+      [req.userId]
     );
     res.json(rows);
   } catch (err) {
@@ -85,7 +87,7 @@ app.get('/api/routes', async (req, res) => {
   }
 });
 
-app.post('/api/routes', async (req, res) => {
+app.post('/api/routes', auth.requireUser, async (req, res) => {
   const { name, waypoints } = req.body || {};
   if (typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Name is required' });
@@ -102,8 +104,8 @@ app.post('/api/routes', async (req, res) => {
 
   try {
     const { rows } = await pool.query(
-      'INSERT INTO routes (name, waypoints_json) VALUES ($1, $2) RETURNING id',
-      [trimmed, JSON.stringify(cleaned)]
+      'INSERT INTO routes (name, waypoints_json, user_id) VALUES ($1, $2, $3) RETURNING id',
+      [trimmed, JSON.stringify(cleaned), req.userId]
     );
     res.status(201).json({ id: rows[0].id, name: trimmed, waypoints: cleaned });
   } catch (err) {
@@ -112,7 +114,7 @@ app.post('/api/routes', async (req, res) => {
   }
 });
 
-app.delete('/api/routes/:id', async (req, res) => {
+app.delete('/api/routes/:id', auth.requireUser, async (req, res) => {
   const id = Number(req.params.id);
   // Øvre grænse fordi id er Postgres INTEGER (int4): et større tal giver ellers
   // "out of range" fra databasen og bliver til 500 i stedet for 400.
@@ -121,7 +123,13 @@ app.delete('/api/routes/:id', async (req, res) => {
   }
 
   try {
-    const { rowCount } = await pool.query('DELETE FROM routes WHERE id = $1', [id]);
+    // user_id i WHERE er det vigtige: uden den kan enhver indlogget bruger slette andres
+    // ruter ved at gætte et id. En andens rute giver 404, ikke 403: set fra din konto
+    // findes den ikke, og så behøver vi heller ikke et ekstra opslag for at skelne.
+    const { rowCount } = await pool.query(
+      'DELETE FROM routes WHERE id = $1 AND user_id = $2',
+      [id, req.userId]
+    );
     if (rowCount === 0) {
       return res.status(404).json({ error: 'Route not found' });
     }

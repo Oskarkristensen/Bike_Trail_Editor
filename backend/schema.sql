@@ -27,3 +27,15 @@ CREATE TABLE IF NOT EXISTS "session" (
   "expire" TIMESTAMP(6) NOT NULL
 );
 CREATE INDEX IF NOT EXISTS "IDX_session_expire" ON "session" ("expire");
+
+-- Hver rute ejes af en bruger (fase 3). ALTER og ikke en kolonne i CREATE TABLE ovenfor:
+-- routes fandtes allerede før brugerne, og CREATE TABLE IF NOT EXISTS springer en
+-- eksisterende tabel helt over. Står efter users, som fremmednøglen peger på.
+-- NOT NULL fejler hvis tabellen indeholder ruter uden ejer — med vilje: så skal de
+-- slettes eller tildeles en bruger først, ikke stille efterlades uden ejer.
+-- CASCADE: sletter man en bruger, forsvinder ruterne med.
+ALTER TABLE routes
+  ADD COLUMN IF NOT EXISTS user_id INTEGER NOT NULL REFERENCES users(id) ON DELETE CASCADE;
+
+-- Præcis den forespørgsel listen laver: én brugers ruter, nyeste først
+CREATE INDEX IF NOT EXISTS routes_user_created_idx ON routes (user_id, created_at DESC);
