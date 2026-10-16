@@ -7,14 +7,17 @@ Interaktiv webapp til oprettelse og redigering af cykelruter på et kort.
 - **Frontend:** React + Vite + TypeScript, Leaflet.js + react-leaflet
 - **Backend:** Node.js + Express (CommonJS)
 - **Routing:** BRouter (offentlig API via backend-proxy, `trekking`-profil)
-- **Database:** SQLite via better-sqlite3
+- **Database:** Postgres på Neon via `pg` (Pool, pooled connection string)
 
 ## Projektstruktur
 
 ```
 backend/          Express API server (port 3001, override med PORT)
   src/index.js    Alle routes, BRouter proxy, validering
-  src/db.js       SQLite-opsætning (routes.db, WAL-mode)
+  src/db.js       Postgres-pool; fejler ved opstart hvis DATABASE_URL mangler
+  src/init-db.js  Kører schema.sql (npm run db:init)
+  schema.sql      Databaseskemaet
+  .env.example    Påkrævede miljøvariabler (i git); den rigtige .env er gitignoreret
 frontend/         Vite + React app (port 5173, proxy /api → backend)
   src/
     components/   Map.tsx, RoutingControl.tsx, Sidebar.tsx, ElevationProfile.tsx
@@ -37,6 +40,14 @@ npm run dev:frontend
 
 Backend-porten kan overrides med `PORT=3099 npm run dev:backend` (nyttigt hvis en
 gammel instans stadig holder 3001). Frontendens Vite-proxy peger fast på 3001.
+
+Backenden kræver `backend/.env` med `DATABASE_URL` (se `.env.example`). Lokalt peger den
+på Neon-branchen **`test`**, ikke `main` — `main` er produktion. Skemaet oprettes med
+`npm run db:init --prefix backend`; det er idempotent og kan køres igen.
+
+**Læs aldrig `backend/.env` og skriv aldrig dens indhold ud** — den indeholder
+databasens adgangskode. Skal noget kontrolleres, så tæl med `grep -c` i stedet for at vise
+linjen.
 
 ## API endpoints
 
@@ -73,6 +84,24 @@ gammel instans stadig holder 3001). Frontendens Vite-proxy peger fast på 3001.
 
   Kendt begrænsning: ældre Garmin Edge-enheder har historisk et loft på ca. 10.000 punkter pr. course. Vi nedsampler ikke ved eksport.
 - **Backend validerer al input** (lat/lng skal være tal i gyldigt interval, profil skal stå på allowlisten). BRouter-kald har 15 s timeout.
+- **Postgres-detaljer der ikke er åbenlyse** (migreret fra SQLite i oktober 2026):
+  - **`routes.id` er `INTEGER`, ikke `BIGINT`.** `pg` leverer int8 som *streng* for ikke at
+    miste præcision, og frontendens `SavedRoute.id` er et `number`.
+  - **Derfor afviser `DELETE /api/routes/:id` id'er uden for 1–2147483647 med 400.** Et
+    større tal er et gyldigt JS-heltal, men Postgres svarer "out of range", og det blev til
+    500. SQLite gav 404 for samme input.
+  - **`sslmode=verify-full`, ikke `require`.** `pg` 8 behandler `require` som `verify-full`
+    og advarer om at `require` i v9 skifter til libpq's svagere betydning (kryptering uden
+    certifikattjek). `sslmode` i connection stringen vinder over `ssl`-optionen i `db.js`,
+    så det er strengen der bestemmer. Neon leverer `require` — ret det ved kopiering, også i
+    Render.
+  - **`waypoints_json` er `jsonb`**, så `pg` parser den selv og Postgres afviser ugyldig
+    JSON ved INSERT. Den gamle "spring korrupte rækker over"-logik er fjernet.
+  - **`.env` indlæses med `node --env-file-if-exists=.env`**, ikke `dotenv`. `-if-exists`
+    fordi Render ikke har nogen `.env`-fil — med `--env-file` alene fejler opstarten. `dev`
+    genstarter også når `.env` ændres (`--watch .env`).
+  - **`created_at` er nu ISO (`2026-10-16T13:26:31.069Z`)**, ikke SQLite's
+    `2026-10-16 13:26:31`. Frontenden viser den ikke, så det er ligegyldigt i dag.
 - **Den viste tid er `distance / brugerhastighed`, ikke BRouters `total-time`.** BRouters egen tidsmodel (bakker, belægning, lyskryds) læses ikke længere — kun `track-length`. Hastigheden sættes i sidepanelet (5–50 km/t, standard 20) og gemmes i localStorage under `bike-trail-editor:speed-kmh`. Bemærk at "skalér BRouters tid efter en ønsket hastighed" matematisk reducerer til samme formel, så der er ikke noget mellemliggende alternativ.
 - **Hastighedsfeltet har to states** (`speed` og `speedInput` i `Sidebar.tsx`). Feltet må være midlertidigt ugyldigt mens man skriver — værdien klampes først ved `onBlur`. Klampning ved hvert tastetryk gør feltet ubrugeligt: man kan ikke skrive "5" på vej mod "50" eller rydde feltet for at starte forfra.
 - **Knapkolonnen ligger uden for `routeInfo`-betingelsen** i `Sidebar.tsx`. Knapper der kræver en rute er `disabled`, men "Importér GPX" er altid aktiv — den skal netop kunne bruges når kortet er tomt.
@@ -134,7 +163,7 @@ Færdigt:
 - Rute beregnes automatisk langs veje via BRouter
 - Sidepanel med distance, tid, waypoint-count
 - "Ryd rute"-knap
-- Gem/hent/slet ruter (SQLite)
+- Gem/hent/slet ruter (Postgres på Neon)
 - GPX-import (`.gpx` med `trkpt`, `rtept` eller `wpt`)
 - GPX-eksport til Garmin/iGPSPORT/Strava (navn indtastes ved eksport)
 - Fejlbeskeder i sidepanelet ved routing-, gem- og importfejl

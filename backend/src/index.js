@@ -1,6 +1,6 @@
 const express = require('express');
 const cors = require('cors');
-const db = require('./db');
+const pool = require('./db');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
@@ -64,21 +64,21 @@ app.post('/api/route', async (req, res) => {
 });
 
 // Saved routes CRUD
-app.get('/api/routes', (req, res) => {
-  const rows = db.prepare('SELECT id, name, waypoints_json, created_at FROM routes ORDER BY created_at DESC').all();
-  const routes = [];
-  for (const r of rows) {
-    try {
-      routes.push({ ...r, waypoints: JSON.parse(r.waypoints_json) });
-    } catch {
-      // Overspring korrupte rækker frem for at fejle hele listen
-      console.warn(`Skipping route ${r.id}: invalid waypoints_json`);
-    }
+// waypoints_json er jsonb, så pg parser den selv — ingen JSON.parse her, og ingen
+// korrupte rækker at springe over: Postgres afviser ugyldig JSON ved INSERT.
+app.get('/api/routes', async (req, res) => {
+  try {
+    const { rows } = await pool.query(
+      'SELECT id, name, waypoints_json AS waypoints, created_at FROM routes ORDER BY created_at DESC'
+    );
+    res.json(rows);
+  } catch (err) {
+    console.error('Kunne ikke hente ruter:', err);
+    res.status(500).json({ error: 'Kunne ikke hente ruter' });
   }
-  res.json(routes);
 });
 
-app.post('/api/routes', (req, res) => {
+app.post('/api/routes', async (req, res) => {
   const { name, waypoints } = req.body || {};
   if (typeof name !== 'string' || !name.trim()) {
     return res.status(400).json({ error: 'Name is required' });
@@ -92,20 +92,37 @@ app.post('/api/routes', (req, res) => {
 
   const trimmed = name.trim().slice(0, 100);
   const cleaned = waypoints.map((wp) => ({ lat: wp.lat, lng: wp.lng }));
-  const result = db.prepare('INSERT INTO routes (name, waypoints_json) VALUES (?, ?)').run(trimmed, JSON.stringify(cleaned));
-  res.status(201).json({ id: result.lastInsertRowid, name: trimmed, waypoints: cleaned });
+
+  try {
+    const { rows } = await pool.query(
+      'INSERT INTO routes (name, waypoints_json) VALUES ($1, $2) RETURNING id',
+      [trimmed, JSON.stringify(cleaned)]
+    );
+    res.status(201).json({ id: rows[0].id, name: trimmed, waypoints: cleaned });
+  } catch (err) {
+    console.error('Kunne ikke gemme rute:', err);
+    res.status(500).json({ error: 'Kunne ikke gemme ruten' });
+  }
 });
 
-app.delete('/api/routes/:id', (req, res) => {
+app.delete('/api/routes/:id', async (req, res) => {
   const id = Number(req.params.id);
-  if (!Number.isInteger(id)) {
+  // Øvre grænse fordi id er Postgres INTEGER (int4): et større tal giver ellers
+  // "out of range" fra databasen og bliver til 500 i stedet for 400.
+  if (!Number.isInteger(id) || id < 1 || id > 2147483647) {
     return res.status(400).json({ error: 'Invalid route id' });
   }
-  const result = db.prepare('DELETE FROM routes WHERE id = ?').run(id);
-  if (result.changes === 0) {
-    return res.status(404).json({ error: 'Route not found' });
+
+  try {
+    const { rowCount } = await pool.query('DELETE FROM routes WHERE id = $1', [id]);
+    if (rowCount === 0) {
+      return res.status(404).json({ error: 'Route not found' });
+    }
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('Kunne ikke slette rute:', err);
+    res.status(500).json({ error: 'Kunne ikke slette ruten' });
   }
-  res.json({ ok: true });
 });
 
 // Fanger bl.a. malformed JSON fra express.json() så serveren svarer pænt

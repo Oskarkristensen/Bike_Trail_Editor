@@ -1,17 +1,21 @@
-const Database = require('better-sqlite3');
-const path = require('path');
+const { Pool } = require('pg');
 
-const db = new Database(path.join(__dirname, '..', 'routes.db'));
+// Fejl her frem for en kryptisk connect-fejl ved første forespørgsel.
+if (!process.env.DATABASE_URL) {
+  throw new Error(
+    'DATABASE_URL mangler. Kopiér backend/.env.example til backend/.env og indsæt '
+    + 'Neons *pooled* connection string.'
+  );
+}
 
-db.pragma('journal_mode = WAL');
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: { rejectUnauthorized: true },
+});
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS routes (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    name TEXT NOT NULL,
-    waypoints_json TEXT NOT NULL,
-    created_at TEXT DEFAULT (datetime('now'))
-  )
-`);
+// Uden denne lytter vælter en baggrundsfejl på en idle klient hele processen.
+pool.on('error', (err) => {
+  console.error('Uventet fejl på idle databaseklient:', err);
+});
 
-module.exports = db;
+module.exports = pool;
