@@ -16,6 +16,7 @@ backend/          Express API server (port 3001, override med PORT)
   src/index.js    Alle routes, BRouter proxy, validering
   src/db.js       Postgres-pool; fejler ved opstart hvis DATABASE_URL mangler
   src/init-db.js  Kører schema.sql (npm run db:init)
+  src/auth.js     Login, sessioner, invitationskode, requireUser
   schema.sql      Databaseskemaet
   .env.example    Påkrævede miljøvariabler (i git); den rigtige .env er gitignoreret
 frontend/         Vite + React app (port 5173, proxy /api → backend)
@@ -41,7 +42,8 @@ npm run dev:frontend
 Backend-porten kan overrides med `PORT=3099 npm run dev:backend` (nyttigt hvis en
 gammel instans stadig holder 3001). Frontendens Vite-proxy peger fast på 3001.
 
-Backenden kræver `backend/.env` med `DATABASE_URL` (se `.env.example`). Lokalt peger den
+Backenden kræver `backend/.env` med `DATABASE_URL`, `SESSION_SECRET` og `INVITE_CODE`
+(se `.env.example`) og nægter at starte uden dem. Lokalt peger den
 på Neon-branchen **`test`**, ikke `main` — `main` er produktion. Skemaet oprettes med
 `npm run db:init --prefix backend`; det er idempotent og kan køres igen.
 
@@ -56,6 +58,13 @@ linjen.
 - `GET /api/routes` — liste over gemte ruter
 - `POST /api/routes` — gem rute. Body: `{ name, waypoints }`
 - `DELETE /api/routes/:id` — slet gemt rute
+- `POST /api/auth/register` — opret bruger. Body: `{ username, password, invite }`. 403 ved
+  forkert kode, 409 hvis navnet er taget
+- `POST /api/auth/login` — Body: `{ username, password }`
+- `POST /api/auth/logout`
+- `GET /api/auth/me` — `{ username }` eller 401
+
+Pr. fase 2 kræver ingen af de eksisterende endpoints login endnu — det kommer i fase 3.
 
 ## Arkitekturbeslutninger
 
@@ -190,7 +199,8 @@ Færdigt:
 - Højdeprofil under kortet med stigning/fald i sidepanelet og markør på kortet ved hover
 
 Ikke implementeret endnu:
-- Brugerkonti/login — planlagt i detaljer, se "Migreringsplan: brugerkonti" nedenfor
+- Brugerkonti/login — backend klar (fase 2), men intet er låst endnu og frontenden har
+  ingen login-skærm. Se "Migreringsplan: brugerkonti" nedenfor
 - Mobiloptimering
 
 ## Migreringsplan: brugerkonti (Neon Postgres + eget login med invitationskode)
@@ -245,9 +255,29 @@ er slettet — den indeholdt kun én testrute, så intet blev migreret.
 tilbage i `braces` via `nodemon` → `chokidar`. Kun dev-afhængighed, kører aldrig i
 produktion. `npm audit fix --force` ville *nedgradere* nodemon til 1.14.10 — gør det ikke.
 
-### Fase 2 — brugere, sessioner og login-endpoints i Express
+### Fase 2 — brugere, sessioner og login-endpoints i Express — **færdig**
 
-Ren tilføjelse; ingen eksisterende endpoints ændrer opførsel endnu.
+Gennemført 16. oktober 2026 i `src/auth.js`, testet mod `test`-branchen gennem
+Vite-proxyen: forkert kode → 403, ugyldigt navn / kort adgangskode → 400, oprettelse →
+201 og logget ind, samme navn igen → 409, ens 401-svar ved ukendt bruger og forkert
+adgangskode, log ud → `/me` giver 401. Desuden eftervist: adgangskoden gemmes som
+`$2b$10$…` (bcrypt), session-id'et skifter ved login, log ud sletter rækken i `session`,
+og **et login overlever en genstart af backenden**. Testbrugeren er slettet igen.
+
+Ting fra implementeringen der ikke står nedenfor:
+- **`pruneSessionInterval` er sat til 24 timer.** connect-pg-simple rydder ellers op
+  hvert ~15. minut (7,5–22,5 min) fra første sessionsopslag og så længe processen lever —
+  set i kildekoden. Neon går i dvale efter 5 minutter, så det ville vække databasen igen
+  og igen og bruge af gratiskvotens compute-timer, mens dev-serveren kører. Udløbne
+  sessioner afvises alligevel ved opslag; oprydningen sparer kun plads.
+- **`trust proxy` er sat nu, ikke først i fase 5** — cookien i `auth.js` afhænger af den
+  i produktion, og det er netop den slags linje der glemmes.
+- **`INVITE_CODE` laves med `openssl rand -base64 15 | tr '+/' '-_'`**, så den kun
+  indeholder tegn der er lette at taste og dele.
+- Log ud kalder også `res.clearCookie('connect.sid')`, ellers bliver browseren ved med at
+  sende et id der ikke findes længere.
+
+Ren tilføjelse; ingen eksisterende endpoints ændrede opførsel.
 
 **Afhængigheder:** `express-session`, `connect-pg-simple`, `bcryptjs`.
 `bcryptjs` frem for `bcrypt`, fordi den er ren JavaScript — ingen native build, samme
@@ -267,8 +297,8 @@ CREATE TABLE IF NOT EXISTS users (
   brugere, selv hvis normaliseringen i koden en dag glemmes.
 - **Sessionstabellen skal også i `schema.sql`**, ikke via `createTableIfMissing` som i
   food waste. Hent definitionen fra `node_modules/connect-pg-simple/table.sql` og gør den
-  idempotent (`IF NOT EXISTS`). Tjek at den kører på Neons Postgres-version — filen er
-  gammel og har tidligere haft `WITH (OIDS=FALSE)`.
+  idempotent (`IF NOT EXISTS`). Gjort — pakkens fil (v10.0.0) har stadig den forældede
+  `WITH (OIDS=FALSE)`, som er udeladt i vores version.
 
 **Endpoints** — JSON, ikke server-renderede formularer som i food waste, da frontenden er
 React:
@@ -336,8 +366,9 @@ ikke derfra uden at læse dette:
   `(user_id, created_at DESC)`, som er præcis den forespørgsel listen laver. **Nu hvor vi
   ejer `users`-tabellen, er en foreign key i orden** — med Neon Auth var den fravalgt,
   fordi Neon ejede tabellen. `CASCADE`: sletter man en bruger, forsvinder ruterne med.
-- **Tabellen er ikke længere tom** — Oskars "Test rute" (id 2) ligger på `test`. Slet den
-  eller tildel den en bruger, før `NOT NULL` tilføjes; ellers fejler migrationen.
+- **`routes` er tom på `test`** — Oskars "Test rute" (id 2) blev slettet 16. okt. 2026
+  netop for at `NOT NULL` kan tilføjes uden backfill. Tjek at den stadig er tom før
+  migrationen; ellers fejler den.
 - Alle tre route-endpoints filtreres på `req.userId`. **`DELETE` skal have
   `WHERE id = $1 AND user_id = $2`** — filtrerer man kun listen, kan en bruger stadig
   slette andres ruter ved at gætte et id. Det er den klassiske fejl i netop dette skridt.
@@ -358,7 +389,7 @@ ikke derfra uden at læse dette:
 - **Express serverer den byggede frontend** (`frontend/dist`) fra samme origin som API'et.
   Det er det der gør cookie-login enkelt: ingen cross-site cookies, og **`cors()` kan
   fjernes helt** i stedet for at låses til en origin. Den er helt åben i dag.
-- **`app.set('trust proxy', 1)`** — Render sætter en proxy foran appen og taler HTTP til
+- **`app.set('trust proxy', 1)`** (allerede sat i fase 2 — fjern den ikke) — Render sætter en proxy foran appen og taler HTTP til
   den. Uden denne linje tror Express at forbindelsen er usikker, og en `secure`-cookie
   bliver aldrig sat: login "virker", men man er logget ud ved næste kald.
 - Kør `db:init` mod **`main`**.

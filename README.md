@@ -48,6 +48,10 @@ and set `DATABASE_URL` to a Neon **pooled** connection string (host contains `-p
 ending in `sslmode=verify-full`. The backend loads `.env` itself via Node's
 `--env-file-if-exists` — no `dotenv` needed. Never commit `.env`.
 
+The same file needs `SESSION_SECRET` (`openssl rand -hex 32`) and `INVITE_CODE`
+(`openssl rand -base64 15`). New users must enter the invite code to sign up, so share
+it only with people who should have access. The backend refuses to start without these.
+
 `npm run db:init --prefix backend` runs `backend/schema.sql`. It is safe to run again.
 
 ## Project Structure
@@ -57,6 +61,7 @@ backend/           Express API (port 3001)
   src/index.js     Routes + BRouter proxy
   src/db.js        Postgres connection pool
   src/init-db.js   Runs schema.sql (npm run db:init)
+  src/auth.js      Login, sessions and invite-code sign-up
   schema.sql       Database schema
   .env.example     Required environment variables
 frontend/          Vite + React (port 5173)
@@ -74,8 +79,15 @@ frontend/          Vite + React (port 5173)
 | GET | `/api/routes` | List saved routes |
 | POST | `/api/routes` | Save route. Body: `{ name, waypoints }` |
 | DELETE | `/api/routes/:id` | Delete saved route |
+| POST | `/api/auth/register` | Sign up. Body: `{ username, password, invite }` |
+| POST | `/api/auth/login` | Log in. Body: `{ username, password }` |
+| POST | `/api/auth/logout` | Log out |
+| GET | `/api/auth/me` | Current user, or 401 |
+
+Logins are cookie sessions stored in Postgres.
 
 ## Planned
 
-- User accounts
+- User accounts: the backend is in place, but routes are not yet tied to users and the
+  frontend has no login screen
 - Mobile optimization

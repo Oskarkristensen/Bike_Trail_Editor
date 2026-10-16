@@ -1,12 +1,19 @@
 const express = require('express');
 const cors = require('cors');
 const pool = require('./db');
+const auth = require('./auth');
 
 const app = express();
 const PORT = Number(process.env.PORT) || 3001;
 
+// Render sætter en proxy foran og taler HTTP til os. Uden denne tror Express at
+// forbindelsen er usikker, og den secure session-cookie bliver aldrig sat.
+app.set('trust proxy', 1);
+
 app.use(cors());
 app.use(express.json());
+app.use(auth.sessionMiddleware);
+app.use('/api/auth', auth.router);
 
 // Health check
 app.get('/api/health', (req, res) => {
