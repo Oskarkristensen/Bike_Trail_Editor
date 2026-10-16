@@ -1,5 +1,5 @@
+const path = require('path');
 const express = require('express');
-const cors = require('cors');
 const pool = require('./db');
 const auth = require('./auth');
 
@@ -10,7 +10,8 @@ const PORT = Number(process.env.PORT) || 3001;
 // forbindelsen er usikker, og den secure session-cookie bliver aldrig sat.
 app.set('trust proxy', 1);
 
-app.use(cors());
+// Ingen cors(): i produktion serverer Express selv frontenden (se nederst), og lokalt
+// sørger Vite-proxyen for samme origin. Cookie-login kræver netop samme origin.
 app.use(express.json());
 app.use(auth.sessionMiddleware);
 app.use('/api/auth', auth.router);
@@ -139,6 +140,11 @@ app.delete('/api/routes/:id', auth.requireUser, async (req, res) => {
     res.status(500).json({ error: 'Kunne ikke slette ruten' });
   }
 });
+
+// Den byggede frontend (npm run build i frontend/). Samme origin som API'et, så
+// session-cookien virker uden cross-site-regler. Lokalt bruges Vite på 5173 i stedet;
+// findes mappen ikke, svarer denne bare 404. Står efter /api, så den aldrig skygger.
+app.use(express.static(path.join(__dirname, '..', '..', 'frontend', 'dist')));
 
 // Fanger bl.a. malformed JSON fra express.json() så serveren svarer pænt
 app.use((err, req, res, next) => {

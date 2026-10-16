@@ -6,7 +6,9 @@
   "scripts": {
     "dev": "concurrently \"npm run dev --prefix backend\" \"npm run dev --prefix frontend\"",
     "dev:backend": "npm run dev --prefix backend",
-    "dev:frontend": "npm run dev --prefix frontend"
+    "dev:frontend": "npm run dev --prefix frontend",
+    "build": "npm ci --prefix backend && npm ci --include=dev --prefix frontend && npm run build --prefix frontend && npm run db:init --prefix backend",
+    "start": "npm start --prefix backend"
   },
   "keywords": [],
   "author": "",
