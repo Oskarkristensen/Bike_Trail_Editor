@@ -25,24 +25,35 @@ const endIcon = L.divIcon({
   iconAnchor: FLAG_ANCHOR,
 })
 
-const DOT_HTML = '<span class="marker-dot"></span>'
+const DOT_SIZE = { waypoint: 16, midpoint: 14 } as const
 
-const waypointIcon = L.divIcon({
-  className: 'waypoint-marker',
-  html: DOT_HTML,
-  iconSize: [16, 16],
-  iconAnchor: [8, 8],
-})
-
-const midpointIcon = L.divIcon({
-  className: 'midpoint-marker',
-  html: DOT_HTML,
-  iconSize: [14, 14],
-  iconAnchor: [7, 7],
-})
+// Pilen viser rutens retning, så man kan skelne ud- og hjemtur på samme vej.
+// Den peger opad i SVG'en og drejes på selve pilen — aldrig på rod-elementet.
+// Ingen retning (ingen rute endnu) = ingen pil.
+function dotIcon(kind: keyof typeof DOT_SIZE, heading?: number): L.DivIcon {
+  const size = DOT_SIZE[kind]
+  const arrow = heading === undefined
+    ? ''
+    : `<svg class="marker-arrow" viewBox="0 0 10 10" style="transform: rotate(${Math.round(heading)}deg)">`
+      + '<path d="M5 1 L9 9 L5 7 L1 9 Z"/></svg>'
+  return L.divIcon({
+    className: `${kind}-marker`,
+    html: `<span class="marker-dot">${arrow}</span>`,
+    iconSize: [size, size],
+    iconAnchor: [size / 2, size / 2],
+  })
+}
 
 // Coalesce bursts af redigeringer (fx flere hurtige højreklik) til ét BRouter-kald
 const ROUTE_DEBOUNCE_MS = 150
+
+// Retningen måles mellem to punkter så langt fra hinanden langs ruten — kort nok til at
+// følge et sving, langt nok til at BRouters tætte punkter i et kryds ikke giver støj
+const HEADING_SAMPLE_M = 15
+
+// Ud- og hjemtur på samme vej ligger begge ~0 m fra et waypoint. Uden tolerance afgør
+// afrundingsstøj hvilken af dem waypointet matcher; med den vinder den første
+const WAYPOINT_MATCH_TOLERANCE_M = 5
 
 import type { RoutingControlHandle, RouteInfo, RoutePoint } from '../types'
 
@@ -61,6 +72,9 @@ interface RouteState {
   abortController: AbortController | null
   debounceTimer: ReturnType<typeof setTimeout> | null
   highlight: L.CircleMarker | null  // punktet højdeprofilen peger på
+  // Rutens retning ud fra hvert waypoint. Pr. markør, ikke pr. indeks, så pilen følger
+  // med når et waypoint indsættes eller slettes og listen forskydes
+  headings: WeakMap<L.Marker, number>
 }
 
 // c.alt er højden fra BRouter og kan mangle på ældre svar
@@ -107,36 +121,38 @@ async function fetchRoute(waypoints: L.LatLng[], signal: AbortSignal): Promise<{
   }
 }
 
-function findClosestIndex(coords: L.LatLng[], target: L.LatLng): number {
-  let minDist = Infinity
-  let minIdx = 0
-  for (let i = 0; i < coords.length; i++) {
-    const d = coords[i].distanceTo(target)
-    if (d < minDist) {
-      minDist = d
-      minIdx = i
-    }
+// Hvert waypoints plads i rutegeometrien. Der søges *fremad* fra forrige waypoints plads,
+// ikke i hele ruten: på en ud-og-hjem-rute kan et waypoint på udturen ellers matche
+// hjemturen på samme vej, så segmentet vendes om og midpointet havner på forkert ben.
+function findWaypointIndices(coords: L.LatLng[], waypoints: L.LatLng[]): number[] {
+  const indices: number[] = []
+  let from = 0
+  for (const wp of waypoints) {
+    const dists = coords.slice(from).map((c) => c.distanceTo(wp))
+    // reduce, ikke Math.min(...dists) — spread af titusindvis af punkter kan sprænge stakken
+    const min = dists.reduce((a, b) => Math.min(a, b), Infinity)
+    const offset = dists.findIndex((d) => d <= min + WAYPOINT_MATCH_TOLERANCE_M)
+    from += Math.max(offset, 0)
+    indices.push(from)
   }
-  return minIdx
+  return indices
 }
 
-function findMidpointAlongPath(coords: L.LatLng[]): L.LatLng {
+function pathLength(coords: L.LatLng[]): number {
+  let total = 0
+  for (let i = 1; i < coords.length; i++) total += coords[i - 1].distanceTo(coords[i])
+  return total
+}
+
+// Punktet `dist` meter inde ad stien, klampet til stiens ender
+function pointAlongPath(coords: L.LatLng[], dist: number): L.LatLng {
   if (coords.length === 0) return L.latLng(0, 0)
-  if (coords.length === 1) return coords[0]
-
-  // Calculate total length
-  let totalDist = 0
-  for (let i = 1; i < coords.length; i++) {
-    totalDist += coords[i - 1].distanceTo(coords[i])
-  }
-
-  // Walk along until we reach half the total distance
-  const halfDist = totalDist / 2
+  if (dist <= 0) return coords[0]
   let accumulated = 0
   for (let i = 1; i < coords.length; i++) {
     const segDist = coords[i - 1].distanceTo(coords[i])
-    if (accumulated + segDist >= halfDist) {
-      const frac = (halfDist - accumulated) / segDist
+    if (segDist > 0 && accumulated + segDist >= dist) {
+      const frac = (dist - accumulated) / segDist
       return L.latLng(
         coords[i - 1].lat + frac * (coords[i].lat - coords[i - 1].lat),
         coords[i - 1].lng + frac * (coords[i].lng - coords[i - 1].lng),
@@ -144,8 +160,22 @@ function findMidpointAlongPath(coords: L.LatLng[]): L.LatLng {
     }
     accumulated += segDist
   }
-
   return coords[coords.length - 1]
+}
+
+// Retning fra a til b i grader med uret fra opad på skærmen. Web Mercator er vinkeltro,
+// så vinklen er den samme på alle zoomniveauer — derfor fast zoom 0 og ikke kortets.
+// undefined hvis punkterne falder sammen; så findes der ingen retning at vise.
+function screenHeading(a: L.LatLng, b: L.LatLng): number | undefined {
+  const pa = L.CRS.EPSG3857.latLngToPoint(a, 0)
+  const pb = L.CRS.EPSG3857.latLngToPoint(b, 0)
+  if (pa.equals(pb)) return undefined
+  return (Math.atan2(pb.x - pa.x, -(pb.y - pa.y)) * 180) / Math.PI
+}
+
+// Rutens retning fra `from` til `to` meter inde ad stien
+function headingAlongPath(coords: L.LatLng[], from: number, to: number): number | undefined {
+  return screenHeading(pointAlongPath(coords, from), pointAlongPath(coords, to))
 }
 
 export default forwardRef<RoutingControlHandle, RoutingControlProps>(function RoutingControl({ onRouteUpdate, onRouteError }, ref) {
@@ -160,6 +190,7 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
     abortController: null,
     debounceTimer: null,
     highlight: null,
+    headings: new WeakMap(),
   })
   const onRouteUpdateRef = useRef(onRouteUpdate)
   onRouteUpdateRef.current = onRouteUpdate
@@ -215,6 +246,7 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
     state.routeLine = null
     state.routeCoords = []
     state.highlight = null
+    state.headings = new WeakMap()
   }, [cancelPending])
 
   useImperativeHandle(ref, () => ({
@@ -256,7 +288,7 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
   const createWaypointMarker = useCallback((latlng: L.LatLng): L.Marker => {
     const state = stateRef.current
     // Rollen (start/slut/mellempunkt) sættes af applyMarkerRoles lige efter
-    const marker = L.marker(latlng, { draggable: true, icon: waypointIcon }).addTo(map)
+    const marker = L.marker(latlng, { draggable: true, icon: dotIcon('waypoint') }).addTo(map)
 
     marker.on('dragend', () => {
       const idx = state.markers.indexOf(marker)
@@ -287,8 +319,11 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
     const last = state.markers.length - 1
     state.markers.forEach((marker, i) => {
       const isEndpoint = i === 0 || i === last
-      // i === 0 vinder, så et enkelt waypoint bliver start — ikke slut
-      marker.setIcon(i === 0 ? startIcon : i === last ? endIcon : waypointIcon)
+      // i === 0 vinder, så et enkelt waypoint bliver start — ikke slut.
+      // Retningen er fra sidste rute og kan være forældet indtil den nye kommer; den
+      // opdateres når runRouteUpdate kalder os igen
+      marker.setIcon(i === 0 ? startIcon : i === last ? endIcon
+        : dotIcon('waypoint', state.headings.get(marker)))
       marker.setZIndexOffset(isEndpoint ? 1000 : 0)
     })
   }, [])
@@ -299,28 +334,34 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
     state.midpointMarkers = []
   }, [])
 
+  // Midpoints og waypoint-pile bygges ud fra samme opdeling af ruten i segmenter
   const createMidpoints = useCallback(() => {
     const state = stateRef.current
     clearMidpoints()
 
     if (state.routeCoords.length === 0) return
 
+    const indices = findWaypointIndices(state.routeCoords, state.waypoints)
+    const headings = new WeakMap<L.Marker, number>()
+
     for (let i = 0; i < state.waypoints.length - 1; i++) {
-      // Find the segment of routeCoords between waypoint i and i+1
-      // by finding the closest route coord to each waypoint
-      const startIdx = findClosestIndex(state.routeCoords, state.waypoints[i])
-      const endIdx = findClosestIndex(state.routeCoords, state.waypoints[i + 1])
+      // findWaypointIndices søger fremad, så indices[i] <= indices[i + 1] altid —
+      // segmentet har rutens rigtige retning
+      const segmentCoords = state.routeCoords.slice(indices[i], indices[i + 1] + 1)
+      const length = pathLength(segmentCoords)
 
-      const lo = Math.min(startIdx, endIdx)
-      const hi = Math.max(startIdx, endIdx)
+      // Retningen ud fra waypoint i. Ved et vendepunkt er det vejen tilbage
+      const outgoing = headingAlongPath(segmentCoords, 0, 2 * HEADING_SAMPLE_M)
+      if (outgoing !== undefined) headings.set(state.markers[i], outgoing)
 
-      // Find the midpoint along the actual route segment
-      const segmentCoords = state.routeCoords.slice(lo, hi + 1)
-      const midCoord = findMidpointAlongPath(segmentCoords)
+      const midCoord = pointAlongPath(segmentCoords, length / 2)
+      const midHeading = headingAlongPath(
+        segmentCoords, length / 2 - HEADING_SAMPLE_M, length / 2 + HEADING_SAMPLE_M,
+      )
 
       const insertIndex = i + 1
       const mid = L.marker(midCoord, {
-        icon: midpointIcon,
+        icon: dotIcon('midpoint', midHeading),
         draggable: true,
       }).addTo(map)
 
@@ -340,7 +381,10 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
 
       state.midpointMarkers.push(mid)
     }
-  }, [map, clearMidpoints])
+
+    state.headings = headings
+    applyMarkerRoles()
+  }, [map, clearMidpoints, applyMarkerRoles])
 
   // Wire up the ref-based functions
   insertWaypointRef.current = (index: number, latlng: L.LatLng) => {
@@ -360,7 +404,10 @@ export default forwardRef<RoutingControlHandle, RoutingControlProps>(function Ro
     state.highlight?.remove()
     state.highlight = null
     clearMidpoints()
-  }, [clearMidpoints])
+    // Ingen rute, ingen retning — en gammel pil ville pege efter en rute der ikke findes
+    state.headings = new WeakMap()
+    applyMarkerRoles()
+  }, [clearMidpoints, applyMarkerRoles])
 
   const runRouteUpdate = useCallback(async () => {
     const state = stateRef.current

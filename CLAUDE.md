@@ -68,8 +68,8 @@ linjen.
   |---|---|---|
   | Start | Grønt flag | Rutens første waypoint |
   | Slut | Ternet målflag | Rutens sidste waypoint |
-  | Waypoint | Fyldt blå cirkel | Et rigtigt punkt på ruten |
-  | Midpoint | Hul stiplet cirkel | Træk mig for at indsætte et nyt waypoint |
+  | Waypoint | Fyldt blå cirkel, hvid pil | Et rigtigt punkt på ruten; pilen viser vejen ruten forlader det |
+  | Midpoint | Hul stiplet cirkel, blå pil | Træk mig for at indsætte et nyt waypoint; pilen viser segmentets retning |
 
   Flagenes `iconAnchor` ligger ved **flagstangens fod**, ikke i midten, så de peger på det præcise punkt. `transform-origin` på `.flag-body` matcher samme punkt, så hover-skalering ikke flytter flaget.
 - **Markørens rod-element tilhører Leaflet — alt visuelt skal ligge i et indre element** (`.marker-dot`, `.flag-body`). Leaflet skriver en *inline* `transform: translate3d(...)` på roden ved hver positionsopdatering (`leaflet-src.js:2532`). Sætter man `transition: transform` der, animeres hvert skridt under et træk, og markøren halter efter musen. Sætter man `transform: scale()` der, sker der omvendt ingenting — inline styles slår stylesheet-regler. Begge dele var reelle fejl indtil hover-effekten blev flyttet ned i de indre elementer. Af samme grund skal `transform-origin` heller ikke stå på roden: det overskriver Leaflets egen `.leaflet-zoom-animated { transform-origin: 0 0 }` og kan forskyde markøren under zoom-animationer.
@@ -107,6 +107,25 @@ linjen.
 - **Knapkolonnen ligger uden for `routeInfo`-betingelsen** i `Sidebar.tsx`. Knapper der kræver en rute er `disabled`, men "Importér GPX" er altid aktiv — den skal netop kunne bruges når kortet er tomt.
 - **Kortets klik-handler ignorerer klik på `.leaflet-marker-icon`.** `addWaypoint` lægger altid punktet sidst i listen, så et klik der falder igennem fra en markør ville gøre den til det nye mål. Markørerne har deres egne handlere; kortklik er kun til tom baggrund.
 - **Midpoint-markører reagerer på både `click` og `dragend`** gennem den samme engangs-indsættelse (`consumed`-flaget i `createMidpoints`). Leaflet starter først et drag efter 3 px bevægelse, så et kort, præcist klik giver aldrig `dragend` — uden klik-handleren skete der ingenting. Flaget sikrer at kun den første af de to events indsætter; markøren bygges alligevel om ved næste `createMidpoints()`.
+- **Retningspile på waypoints og midpoints** (oktober 2026) — så man kan se om et punkt
+  ligger på ud- eller hjemturen, når de to følger samme vej. Flagene har ingen pil.
+  - **Waypoints matches til ruten ved at søge *fremad*** (`findWaypointIndices`), ikke ved
+    nærmeste punkt i hele ruten som før. Det var en reel fejl: ligger et hjemturs-waypoint
+    præcis oven i et udturs-waypoint, matchede den gamle kode begge til udturen. Segmentet
+    blev vendt om, midpointet havnede på forkert ben, og en pil ville have peget forkert.
+    Bevist med en rigtig BRouter-rute ud og hjem ad Silkeborgvej: gammel kode gav indeks
+    64 for hjemturs-waypointet (udturen), ny kode 209. Tolerancen på 5 m
+    (`WAYPOINT_MATCH_TOLERANCE_M`) gør at første passage vinder når to ligger lige tæt.
+  - **Vinklen regnes i Web Mercator-koordinater på fast zoom 0**, ikke i grader lat/lng.
+    Mercator er vinkeltro, så vinklen gælder på alle zoomniveauer; lat/lng-grader ville
+    give skæve pile langt fra ækvator (i Aarhus er en længdegrad ~56 % af en breddegrad).
+  - **Retningen gemmes pr. markør i et `WeakMap`, ikke pr. indeks**, og ikonet bygges om
+    i `applyMarkerRoles`. Indsættes eller slettes et waypoint, forskydes indekserne; pr.
+    markør følger pilen med indtil den nye rute kommer 150 ms+ senere.
+  - **Pilen drejes på `.marker-arrow`** — samme regel som resten: aldrig på rod-elementet.
+    Den bruger `currentColor`, så midpointets pil bliver hvid når cirklen fyldes ved hover.
+  - Kendt begrænsning: ligger to midpoints *præcis* oven i hinanden (symmetriske
+    waypoints ud og hjem), ses kun den øverste pil.
 - **Hastighedsfeltet er `type="text"`, ikke `type="number"`** — bevidst, for at undgå op/ned-pile og at scrollhjulet ændrer værdien. `parseSpeed()` accepterer dansk decimalkomma.
 - **Højdeprofilen bygger på BRouters tredje koordinat**, den samme højde GPX-eksporten
   bruger. Al beregning ligger i `frontend/src/elevation.ts`, tegningen i

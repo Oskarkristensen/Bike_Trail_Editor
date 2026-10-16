@@ -483,6 +483,7 @@
 }
 
 .marker-dot {
+  position: relative; /* anker for .marker-arrow */
   display: block;
   width: 100%;
   height: 100%;
@@ -490,9 +491,27 @@
   transition: transform 0.15s, background 0.15s, opacity 0.15s;
 }
 
+/* Retningspil — viser hvilken vej ruten går, så ud- og hjemtur på samme vej kan
+   skelnes. Drejningen står inline på pilen selv (sat i RoutingControl.tsx), aldrig på
+   rod-elementet. Farven følger prikkens `color`, så den skifter med hover. */
+.marker-arrow {
+  position: absolute;
+  inset: 0;
+  margin: auto;
+  width: 8px;
+  height: 8px;
+  fill: currentColor;
+  pointer-events: none;
+}
+.midpoint-marker .marker-arrow {
+  width: 7px;
+  height: 7px;
+}
+
 /* Almindelige waypoints: fyldt = et rigtigt punkt */
 .waypoint-marker .marker-dot {
   background: #2563eb;
+  color: white;
   border: 2px solid white;
   box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
 }
@@ -505,12 +524,14 @@
    bevidst underordnet de fyldte waypoints */
 .midpoint-marker .marker-dot {
   background: rgba(255, 255, 255, 0.9);
+  color: #2563eb;
   border: 2px dashed #2563eb;
   opacity: 0.75;
   box-shadow: 0 1px 2px rgba(0, 0, 0, 0.2);
 }
 .midpoint-marker:hover .marker-dot {
   background: #2563eb;
+  color: white;
   border-style: solid;
   opacity: 1;
   transform: scale(1.3);

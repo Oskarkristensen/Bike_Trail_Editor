@@ -7,6 +7,7 @@ Interactive web app for creating and editing bike routes on a map. Click to add 
 - Click on the map to add waypoints
 - Drag waypoints to move them, right-click to delete
 - Drag midpoint markers to insert new waypoints along the route
+- Direction arrows on waypoints and midpoints, so the outbound and return legs of an out-and-back route can be told apart
 - Routes follow actual roads and bike paths (BRouter trekking profile)
 - Start and finish are shown as distinct flag markers; the roles follow position in the list, so deleting the first waypoint promotes the second
 - Save and load routes (Postgres)
