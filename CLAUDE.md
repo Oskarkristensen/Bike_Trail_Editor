@@ -210,15 +210,15 @@ Færdigt:
 - Kortet zoomer til ruten når en gemt rute eller GPX-fil indlæses
 - Højdeprofil under kortet med stigning/fald i sidepanelet og markør på kortet ved hover
 - Brugerkonti: login og oprettelse med invitationskode, ruter pr. bruger (fase 2–4)
+- **I produktion på https://bike-trail-editor.onrender.com** (Render + Neon `main`, fase 5)
 
 Ikke implementeret endnu:
-- Deploy til Render — fase 5 i "Migreringsplan: brugerkonti" nedenfor
 - Mobiloptimering
 
 ## Migreringsplan: brugerkonti (Neon Postgres + eget login med invitationskode)
 
-**Status: fase 1 færdig (16. oktober 2026), fase 2–5 planlagt.** Afsnittene fra fase 2 og
-frem er beslutninger, ikke kode der findes. Læs dem inden du begynder — flere af valgene er
+**Status: alle fem faser færdige 16. oktober 2026; appen kører i produktion.** Afsnittet
+er bevaret som dokumentation af *hvorfor* tingene er som de er — flere af valgene blev
 truffet for at undgå fælder der ikke er åbenlyse.
 
 **Planen blev lavet om 16. okt. 2026: Neon Auth er droppet** til fordel for samme model
@@ -236,13 +236,15 @@ tabel, cookie-session i Postgres, og en invitationskode for at oprette sig. Grun
 
 ### Udgangspunkt
 
-Appen skal hostes på **Render's gratis tier**, hvor filsystemet er flygtigt og instansen
-lukker ned efter ~15 minutters inaktivitet. **SQLite kan derfor ikke bruges i produktion**
+Appen hostes på **Render's gratis tier**, hvor filsystemet er flygtigt og instansen
+lukker ned efter 15 minutters inaktivitet. **SQLite kan derfor ikke bruges i produktion**
 — filen overlever ikke en deploy. Databasen er flyttet til **Neon** (serverless Postgres).
 
 Neon-projektet har **to branches: `main` (produktion) og `test` (lokal udvikling)**. Bevidst
-kun to — der kommer ikke en tredje. `routes`-tabellen er oprettet på **`test`**. **På
-`main` er der intet endnu** — hverken tabel eller noget i Render.
+kun to — der kommer ikke en tredje. **Hvilken branch appen bruger, bestemmes alene af
+hvilken connection string der står hvor:** `test`'s i `backend/.env`, `main`'s kun i
+Render. Lokalt kan man derfor aldrig ramme produktionen — så længe `main`'s string aldrig
+lægges i `.env`.
 
 ### Skridt der kræver dashboard-adgang (kan ikke gøres herfra)
 
@@ -423,20 +425,52 @@ mens man er logget ind.
 - 401 fra et hvilket som helst kald → tilbage til login-skærmen, ikke en vilkårlig
   fejlbesked i sidepanelet. Sessionen kan være slettet eller udløbet.
 
-### Fase 5 — deploy
+### Fase 5 — deploy — **færdig**
 
-- **Express serverer den byggede frontend** (`frontend/dist`) fra samme origin som API'et.
-  Det er det der gør cookie-login enkelt: ingen cross-site cookies, og **`cors()` kan
-  fjernes helt** i stedet for at låses til en origin. Den er helt åben i dag.
-- **`app.set('trust proxy', 1)`** (allerede sat i fase 2 — fjern den ikke) — Render sætter en proxy foran appen og taler HTTP til
-  den. Uden denne linje tror Express at forbindelsen er usikker, og en `secure`-cookie
-  bliver aldrig sat: login "virker", men man er logget ud ved næste kald.
-- Kør `db:init` mod **`main`**.
-- Env vars i Render: `DATABASE_URL` (`main`'s pooled string med **`sslmode=verify-full`**),
-  `SESSION_SECRET` (lang tilfældig streng, fx `openssl rand -hex 32`), `INVITE_CODE`
-  (lang og tilfældig, se fase 2), `NODE_ENV=production`.
-- **Bevis det efter deploy:** oprettelse med forkert kode skal give fejl, login skal
-  overleve et reload, og `/api/routes` uden cookie skal give 401.
+**Live 16. oktober 2026 på https://bike-trail-editor.onrender.com.** Eftervist udefra:
+health og forside 200; `/api/routes`, `/api/route`, `DELETE` og `/me` uden login 401;
+oprettelse med forkert kode 403; login med ukendt bruger 401 og ikke 500 (beviser at
+`users` findes på `main`, altså at `db:init` kørte i buildet); ingen CORS-headere mod en
+fremmed origin. Oskar eftervist i Safari: konto oprettet med produktionens kode, login
+overlever reload, og cookien er `Secure`, `HttpOnly` og `SameSite=Lax`.
+
+**Opsætningen i Render** (Web Service, region **Frankfurt** — samme by som Neons
+`eu-central-1`):
+
+| Felt | Værdi |
+|---|---|
+| Build Command | `npm run build` |
+| Start Command | `npm start` |
+| Health Check Path | `/api/health` |
+| Env vars | `DATABASE_URL` (`main`, pooled, **`sslmode=verify-full`**), `SESSION_SECRET`, `INVITE_CODE`, `NODE_ENV=production` |
+
+`SESSION_SECRET` og `INVITE_CODE` i Render er **andre værdier end i den lokale `.env`**.
+
+**To fælder vi faktisk ramte:**
+- **Render udfylder selv Build Command med `npm install` og Start Command med `node
+  index.js`.** Med dem bliver frontenden aldrig bygget, skemaet aldrig kørt, og opstarten
+  fejler med `Cannot find module '/opt/render/project/src/index.js'` —
+  `/opt/render/project/src/` er repoets rod på Render, ikke vores `src/`-mappe.
+- **Repoet var ikke på listen i Render**, fordi GitHub-forbindelsen kun gav adgang til
+  `food_waste_website`. Det blev tilføjet som "Public Git Repository" via URL'en. **Så
+  deployer Render ikke automatisk ved push** — brug "Manual Deploy". Vil man have
+  auto-deploy, så giv Render adgang til repoet i GitHub (Settings → Applications →
+  Render → Configure) og forbind servicen om.
+
+**Hvad koden gør for at deployet virker** (`0757e3e`):
+- **Express serverer `frontend/dist`** fra samme origin som API'et. Derfor virker
+  cookie-login uden cross-site-regler, og **`cors()` er fjernet helt**.
+- **`app.set('trust proxy', 1)`** (sat i fase 2 — fjern den ikke). Render sætter en proxy
+  foran og taler HTTP til appen; uden linjen bliver `secure`-cookien aldrig sat.
+- **`npm run build` kører `db:init` mod `main`.** Render's gratis tier har ingen shell, og
+  sådan skal `main`'s connection string aldrig ligge på en lokal maskine. Skemaet er
+  idempotent, så det er ufarligt ved hver deploy. **Ændres skemaet, sker det altså ved
+  næste deploy** — og `NOT NULL`-kolonner på tabeller med data vil få buildet til at fejle.
+- **Frontendens devDependencies installeres eksplicit** (`npm ci --include=dev`). Med
+  `NODE_ENV=production` springer `npm ci` dem ellers over, og Vite mangler. Eftervist
+  lokalt på en kopi af `package.json`/lockfilen.
+- **`.node-version` låser Node 24** — `--env-file-if-exists` kræver mindst 22.9. Render
+  viste "Using Node.js version 24" i loggen.
 
 ### Afgjorte beslutninger
 
@@ -448,8 +482,11 @@ mens man er logget ind.
 
 ### Faldgruber der er værd at kende på forhånd
 
-- **Første kald efter en pause er langsomt.** Neon skalerer til nul, og Render's gratis
-  tier lukker ned ved inaktivitet. Det er kosmetik, ikke en fejl — men det ligner en fejl.
+- **Første kald efter en pause er langsomt.** Render's gratis tier sover efter 15 min
+  uden besøg (food waste-sitet tog 22,7 s om første svar), og Neon efter 5 min uden
+  forespørgsler. Neons andel er lille — målt 16. okt. 2026 med en død session-cookie mod
+  dev-serveren: 1,3 s når Neon sov, 0,4 s vågen med ny forbindelse, 0,06 s med eksisterende.
+  Det er kosmetik, ikke en fejl — men det ligner en fejl; derfor "Starter serveren…".
 - **Brug den pooled connection string.** Den direkte er til migrationer og engangsjobs.
 - **Hvert API-kald læser sessionen fra Postgres** (én forespørgsel). Ubetydeligt her,
   men det er grunden til at sessionstabellen har index på `expire` — connect-pg-simple

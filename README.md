@@ -2,6 +2,8 @@
 
 Interactive web app for creating and editing bike routes on a map. Click to add waypoints, drag to move them, and routes are automatically calculated along real roads and bike paths via [BRouter](https://brouter.de).
 
+Live at **https://bike-trail-editor.onrender.com** (invite only). On the free tier the server sleeps after 15 minutes without visitors, so the first page load after a pause can take 20–30 seconds.
+
 ## Features
 
 - Click on the map to add waypoints
@@ -23,6 +25,7 @@ Interactive web app for creating and editing bike routes on a map. Click to add 
 - **Backend:** Node.js, Express
 - **Routing:** BRouter (public API, proxied through backend)
 - **Database:** Postgres on [Neon](https://neon.tech) (`pg`)
+- **Hosting:** [Render](https://render.com) free tier; Express serves both the API and the built frontend
 
 ## Getting Started
 
@@ -90,7 +93,22 @@ Logins are cookie sessions stored in Postgres. Every endpoint except `/api/healt
 `/api/auth/*` requires a login and returns 401 otherwise. Saved routes belong to the user
 who created them; other users can neither see nor delete them.
 
+## Deployment
+
+The app runs as a single Render Web Service: Express serves the API and the built
+frontend from the same origin, which keeps the session cookie simple.
+
+| Setting | Value |
+|---|---|
+| Build Command | `npm run build` |
+| Start Command | `npm start` |
+| Health Check Path | `/api/health` |
+| Environment | `DATABASE_URL`, `SESSION_SECRET`, `INVITE_CODE`, `NODE_ENV=production` |
+
+Render pre-fills `npm install` and `node index.js`; both must be replaced. The build
+installs both packages, builds the frontend and runs `db:init`, so schema changes are
+applied on the next deploy. Node 24 is pinned in `.node-version`.
+
 ## Planned
 
-- Deployment to Render
 - Mobile optimization
