@@ -1,6 +1,7 @@
 import { useEffect, useRef, useCallback, useImperativeHandle, forwardRef } from 'react'
 import { useMap } from 'react-leaflet'
 import L from 'leaflet'
+import { apiFetch } from '../api'
 
 // Alle markører er divIcons stylet i App.css — ingen billeder fra CDN
 
@@ -87,7 +88,7 @@ async function fetchRoute(waypoints: L.LatLng[], signal: AbortSignal): Promise<{
   distance: number
 }> {
   const wps = waypoints.map((wp) => ({ lat: wp.lat, lng: wp.lng }))
-  const res = await fetch('/api/route', {
+  const res = await apiFetch('/api/route', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ waypoints: wps }),

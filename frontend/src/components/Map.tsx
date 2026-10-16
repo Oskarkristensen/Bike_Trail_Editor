@@ -7,6 +7,7 @@ import Sidebar from './Sidebar'
 import ElevationProfileChart from './ElevationProfile'
 import { buildGPX, gpxFilename, downloadFile } from '../gpx'
 import { buildElevationProfile } from '../elevation'
+import { apiFetch } from '../api'
 import type { RoutingControlHandle, RouteInfo, SavedRoute } from '../types'
 
 const AARHUS_CENTER: [number, number] = [56.15, 10.19]
@@ -51,7 +52,7 @@ export default function Map() {
       throw new Error('Ruten skal have mindst 2 waypoints')
     }
 
-    const res = await fetch('/api/routes', {
+    const res = await apiFetch('/api/routes', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ name, waypoints }),

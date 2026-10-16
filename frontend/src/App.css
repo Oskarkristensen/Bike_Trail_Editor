@@ -17,9 +17,104 @@
   flex-shrink: 0;
 }
 
+.app-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+
 .app-header h1 {
   font-size: 1.2rem;
   font-weight: 600;
+}
+
+.app-header-user {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 0.9rem;
+  opacity: 0.9;
+}
+
+/* Lys knap på den mørke header — btn-secondary er for lys mod #2c3e50 */
+.btn-header {
+  background: transparent;
+  color: white;
+  border: 1px solid rgba(255, 255, 255, 0.4);
+  padding: 4px 10px;
+  font-size: 0.85rem;
+}
+.btn-header:hover:not(:disabled) {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+/* Login, oprettelse og "starter serveren" — fylder pladsen under headeren */
+.login-screen {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  background: #f8f9fa;
+}
+
+.login-card {
+  width: 100%;
+  max-width: 340px;
+  background: white;
+  border: 1px solid #dee2e6;
+  border-radius: 8px;
+  padding: 24px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.login-card h2 {
+  font-size: 1.1rem;
+  color: #212529;
+  margin-bottom: 4px;
+}
+
+.login-card .sidebar-error {
+  margin-bottom: 0;
+}
+
+.login-field {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  font-size: 0.8rem;
+  color: #495057;
+}
+
+.login-field input {
+  padding: 8px 10px;
+  border: 1px solid #ced4da;
+  border-radius: 6px;
+  font-size: 0.95rem;
+  outline: none;
+}
+.login-field input:focus {
+  border-color: #2563eb;
+  box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.2);
+}
+
+.login-field small {
+  color: #868e96;
+  font-size: 0.75rem;
+}
+
+.login-switch {
+  background: none;
+  border: none;
+  color: #2563eb;
+  font-size: 0.85rem;
+  cursor: pointer;
+  padding: 4px;
+}
+.login-switch:hover:not(:disabled) {
+  text-decoration: underline;
 }
 
 /* Layout: sidebar + map */

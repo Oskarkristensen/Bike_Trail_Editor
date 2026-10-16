@@ -1,5 +1,6 @@
 import { useRef, useState, useEffect, useCallback } from 'react'
 import { parseGPX, sampleWaypoints } from '../gpx'
+import { apiFetch } from '../api'
 import type { ElevationProfile } from '../elevation'
 import type { RouteInfo, SavedRoute } from '../types'
 
@@ -109,7 +110,7 @@ export default function Sidebar({ routeInfo, elevation, routeError, showElevatio
 
   const fetchRoutes = useCallback(async () => {
     try {
-      const res = await fetch('/api/routes')
+      const res = await apiFetch('/api/routes')
       if (!res.ok) throw new Error(`HTTP ${res.status}`)
       setSavedRoutes(await res.json())
     } catch (err) {
@@ -153,7 +154,7 @@ export default function Sidebar({ routeInfo, elevation, routeError, showElevatio
   const handleDelete = async (id: number) => {
     setActionError(null)
     try {
-      const res = await fetch(`/api/routes/${id}`, { method: 'DELETE' })
+      const res = await apiFetch(`/api/routes/${id}`, { method: 'DELETE' })
       if (!res.ok) throw new Error(`Kunne ikke slette ruten (HTTP ${res.status})`)
       await fetchRoutes()
     } catch (err) {

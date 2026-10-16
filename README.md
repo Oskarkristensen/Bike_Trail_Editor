@@ -15,6 +15,7 @@ Interactive web app for creating and editing bike routes on a map. Click to add 
 - Export GPX for bike computer apps (Garmin Connect, iGPSPORT, Strava) — full routed geometry with elevation
 - Distance, and travel time based on a speed you set yourself (5–50 km/h, remembered in localStorage)
 - Elevation profile below the map: hover the chart to mark the matching spot on the route. Total ascent and descent are noise-filtered, since BRouter's SRTM elevations jitter by a few metres between neighbouring points
+- User accounts with username and password. Signing up requires an invite code, and each user only sees their own saved routes
 
 ## Tech Stack
 
@@ -65,7 +66,8 @@ backend/           Express API (port 3001)
   schema.sql       Database schema
   .env.example     Required environment variables
 frontend/          Vite + React (port 5173)
-  src/components/  Map, RoutingControl, Sidebar, ElevationProfile
+  src/components/  Map, RoutingControl, Sidebar, ElevationProfile, LoginScreen
+  src/api.ts       Fetch wrapper (401 → login screen) and auth calls
   src/elevation.ts Ascent/descent and chart downsampling
   src/gpx.ts       GPX import and export
   src/types.ts     Shared TypeScript interfaces
@@ -90,6 +92,5 @@ who created them; other users can neither see nor delete them.
 
 ## Planned
 
-- Login screen. The backend requires a login, but the frontend has no way to log in
-  yet, so the app is not usable in the browser until this is done
+- Deployment to Render
 - Mobile optimization

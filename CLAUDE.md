@@ -21,7 +21,9 @@ backend/          Express API server (port 3001, override med PORT)
   .env.example    Påkrævede miljøvariabler (i git); den rigtige .env er gitignoreret
 frontend/         Vite + React app (port 5173, proxy /api → backend)
   src/
-    components/   Map.tsx, RoutingControl.tsx, Sidebar.tsx, ElevationProfile.tsx
+    components/   Map.tsx, RoutingControl.tsx, Sidebar.tsx, ElevationProfile.tsx,
+                  LoginScreen.tsx
+    api.ts        apiFetch (401 → login-skærm) og login-kaldene
     elevation.ts  Højdeprofil: stigning/fald, nedsampling til graf
     gpx.ts        GPX-import og -eksport
     types.ts      Delte TypeScript interfaces
@@ -207,11 +209,10 @@ Færdigt:
 - Fejlbeskeder i sidepanelet ved routing-, gem- og importfejl
 - Kortet zoomer til ruten når en gemt rute eller GPX-fil indlæses
 - Højdeprofil under kortet med stigning/fald i sidepanelet og markør på kortet ved hover
+- Brugerkonti: login og oprettelse med invitationskode, ruter pr. bruger (fase 2–4)
 
 Ikke implementeret endnu:
-- Brugerkonti/login — backenden er færdig og låst (fase 2 og 3), men **frontenden har
-  ingen login-skærm endnu, så appen kan ikke bruges i browseren** — kortklik giver
-  "Login kræves". Det er forventet indtil fase 4. Se "Migreringsplan: brugerkonti" nedenfor
+- Deploy til Render — fase 5 i "Migreringsplan: brugerkonti" nedenfor
 - Mobiloptimering
 
 ## Migreringsplan: brugerkonti (Neon Postgres + eget login med invitationskode)
@@ -396,10 +397,26 @@ slettet igen.
   slette andres ruter ved at gætte et id. Det er den klassiske fejl i netop dette skridt.
 - `/api/route` (BRouter-proxyen) får også `requireUser`.
 
-### Fase 4 — frontend
+### Fase 4 — frontend — **færdig**
 
-- Login- og opret-skærm (brugernavn, adgangskode, og invitationskode ved oprettelse).
-  `GET /api/auth/me` ved opstart afgør om den vises. Log ud-knap i sidepanelet.
+Gennemført 16. oktober 2026. Oskar testede i browseren: oprettelse med invitationskode,
+gem rute, reload (stadig logget ind, ruten er der), log ud og ind igen, forkert
+adgangskode. **Ikke testet:** at en session der forsvinder *mens man bruger appen*
+sender en tilbage til login-skærmen — det kræver at sessionsrækken slettes i databasen
+mens man er logget ind.
+
+- Login- og opret-skærm i én formular (`LoginScreen.tsx`); skifter man mellem dem, bevares
+  det man har skrevet. `GET /api/auth/me` ved opstart afgør om den vises.
+- **Log ud ligger i headeren, ikke i sidepanelet** som oprindeligt planlagt — headeren er
+  synlig overalt, og knappen skal ikke trækkes ned gennem komponenterne.
+- **`apiFetch` i `api.ts` er den eneste vej til de beskyttede endpoints.** Ved 401 kalder
+  den én handler, som `App` registrerer, og som sender tilbage til login-skærmen. **Login-
+  kaldene bruger bevidst almindelig `fetch`:** forkert adgangskode giver også 401, og det
+  må ikke udløse handleren. Nye kald til `/api/route(s)` skal gå gennem `apiFetch`.
+- **"Starter serveren…" mens `/me` svarer.** Render's gratis tier og Neon sover efter en
+  pause; food waste-sitet tog 22,7 s om første svar. Uden teksten ligner det at appen er
+  gået i stå. Fejler kaldet (ikke 401), vises fejlen med en "Prøv igen"-knap.
+- Log ud sætter brugeren til `null` også hvis kaldet fejler — brugeren har bedt om det.
 - **Ingen tokens i frontenden.** Cookien sendes automatisk med på kald til samme origin
   (`fetch`'s standard er `credentials: 'same-origin'`). Lokalt sørger Vite-proxyen for at
   `/api` er samme origin.
