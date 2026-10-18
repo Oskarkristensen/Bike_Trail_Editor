@@ -34,3 +34,6 @@ Thumbs.db
 
 # Claude
 .claude/
+
+# Skærmbilleder fra telefonen til fejlfinding — kan indeholde personlige ting
+screenshots/

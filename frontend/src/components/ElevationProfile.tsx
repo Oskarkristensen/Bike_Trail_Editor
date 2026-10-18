@@ -3,7 +3,13 @@ import { sampleAtDistance } from '../elevation'
 import type { ElevationProfile, ElevationSample } from '../elevation'
 
 const CHART_HEIGHT = 150
+// På en telefon tager 150 px for meget af kortet — under denne bredde bruges den lave
+const NARROW_WIDTH = 500
+const CHART_HEIGHT_NARROW = 100
 const PAD = { top: 12, right: 12, bottom: 22, left: 46 }
+// Plads pr. afstandsetiket ("12,5 km" er ~45 px) — antallet følger bredden,
+// ellers skriver de oven i hinanden på en smal skærm
+const PX_PER_DISTANCE_TICK = 80
 /** Flad rute: tving mindst så mange meter ind på y-aksen, ellers ligner
  *  10 cm støj en bjergetape */
 const MIN_ELEVATION_RANGE_M = 20
@@ -64,8 +70,9 @@ export default function ElevationProfileChart({ profile, onHoverPoint, onClose }
 
   const { samples, totalDistance, minEle, maxEle, ascent, descent } = profile
 
+  const chartHeight = width > 0 && width < NARROW_WIDTH ? CHART_HEIGHT_NARROW : CHART_HEIGHT
   const innerWidth = Math.max(0, width - PAD.left - PAD.right)
-  const innerHeight = CHART_HEIGHT - PAD.top - PAD.bottom
+  const innerHeight = chartHeight - PAD.top - PAD.bottom
 
   // y-aksen: udvid til et minimumsinterval og rund ud til pæne gridlinjer
   let low = minEle
@@ -93,7 +100,10 @@ export default function ElevationProfileChart({ profile, onHoverPoint, onClose }
   const eleTicks: number[] = []
   for (let e = low; e <= high + 0.001; e += eleStep) eleTicks.push(e)
 
-  const distStep = niceStep(Math.max(totalDistance, 1), 5)
+  // Højst 5 som før — bredden skal kun *sænke* antallet på smalle skærme, ikke fylde
+  // desktop-aksen med en etiket hver halve kilometer
+  const distTickCount = Math.min(5, Math.max(2, Math.floor(innerWidth / PX_PER_DISTANCE_TICK)))
+  const distStep = niceStep(Math.max(totalDistance, 1), distTickCount)
   const distTicks: number[] = []
   for (let d = 0; d <= totalDistance + 0.001; d += distStep) distTicks.push(d)
 
@@ -129,7 +139,7 @@ export default function ElevationProfileChart({ profile, onHoverPoint, onClose }
         {width > 0 && (
           <svg
             width={width}
-            height={CHART_HEIGHT}
+            height={chartHeight}
             role="img"
             aria-label={summary}
             onPointerMove={handlePointerMove}
@@ -162,7 +172,7 @@ export default function ElevationProfileChart({ profile, onHoverPoint, onClose }
                 key={d}
                 className="elevation-tick"
                 x={xAt(d)}
-                y={CHART_HEIGHT - 6}
+                y={chartHeight - 6}
                 textAnchor={d === 0 ? 'start' : 'middle'}
               >
                 {formatKm(d)}

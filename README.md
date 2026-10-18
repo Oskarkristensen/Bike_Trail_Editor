@@ -18,6 +18,7 @@ Live at **https://bike-trail-editor.onrender.com** (invite only). On the free ti
 - Distance, and travel time based on a speed you set yourself (5–50 km/h, remembered in localStorage)
 - Elevation profile below the map: hover the chart to mark the matching spot on the route. Total ascent and descent are noise-filtered, since BRouter's SRTM elevations jitter by a few metres between neighbouring points
 - User accounts with username and password. Signing up requires an invite code, and each user only sees their own saved routes
+- Works on phones: full-width map with a bottom sheet you can drag up for the route details, saved routes and GPX, plus larger touch targets. Landscape and tablets are handled too
 
 ## Tech Stack
 
@@ -109,6 +110,13 @@ Render pre-fills `npm install` and `node index.js`; both must be replaced. The b
 installs both packages, builds the frontend and runs `db:init`, so schema changes are
 applied on the next deploy. Node 24 is pinned in `.node-version`.
 
-## Planned
+## Testing on a phone
 
-- Mobile optimization
+Start the frontend with `npm run dev --prefix frontend -- --host` and open
+`http://<your computer's LAN IP>:5173` on a phone on the same Wi-Fi. For layout checks
+without a phone, Playwright (a root dev dependency) can emulate devices; run
+`npx playwright install webkit chromium` once to fetch the browsers.
+
+Note for iOS 26: Safari's bottom toolbar floats over the page, and
+`env(safe-area-inset-bottom)` reports 0 even with `viewport-fit=cover`. The app therefore
+uses `position: fixed; inset: 0` rather than a viewport height. Details are in `CLAUDE.md`.

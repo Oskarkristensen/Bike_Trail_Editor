@@ -38,14 +38,20 @@ interface SidebarProps {
   /** null når ruten ikke har højdedata — så vises stigning/fald slet ikke */
   elevation: ElevationProfile | null
   routeError: string | null
-  showElevation: boolean
-  onToggleElevation: () => void
   onClearRoute: () => void
   onSaveRoute: (name: string) => Promise<void>
   onLoadRoute: (route: SavedRoute) => void
   onImportGPX: (waypoints: { lat: number; lng: number }[]) => void
   onExportGPX: (name: string) => void
 }
+
+// Sletning (højreklik / langt tryk) og træk er ikke til at gætte, så det står på skærmen.
+// Teksten følger den primære input: pointer: coarse = finger. Samme test som markørernes
+// størrelse i RoutingControl.tsx. Sletning står først: det er den man ikke kan gætte,
+// og på en smal skærm blev slutningen af teksten ellers skåret væk.
+const EDIT_TIP = typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches
+  ? 'Hold fingeren på et punkt for at slette det · træk for at flytte'
+  : 'Højreklik på et punkt for at slette det · træk for at flytte'
 
 function errorMessage(err: unknown, fallback: string): string {
   return err instanceof Error && err.message ? err.message : fallback
@@ -70,7 +76,7 @@ function travelSeconds(meters: number, speedKmh: number): number {
   return (meters * 3.6) / speedKmh
 }
 
-export default function Sidebar({ routeInfo, elevation, routeError, showElevation, onToggleElevation, onClearRoute, onSaveRoute, onLoadRoute, onImportGPX, onExportGPX }: SidebarProps) {
+export default function Sidebar({ routeInfo, elevation, routeError, onClearRoute, onSaveRoute, onLoadRoute, onImportGPX, onExportGPX }: SidebarProps) {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [savedRoutes, setSavedRoutes] = useState<SavedRoute[]>([])
   const [showSaveDialog, setShowSaveDialog] = useState(false)
@@ -83,6 +89,84 @@ export default function Sidebar({ routeInfo, elevation, routeError, showElevatio
   // Feltet må gerne være midlertidigt ugyldigt mens man skriver.
   const [speed, setSpeed] = useState(loadSpeed)
   const [speedInput, setSpeedInput] = useState(() => String(loadSpeed()))
+  // Kun på smalle skærme: panellet ligger under kortet og foldes ud/ind. På desktop
+  // er knappen skjult med CSS, og indholdet vises altid.
+  const [mobileOpen, setMobileOpen] = useState(false)
+
+  // Håndtaget lover at panelet kan trækkes — så det skal også kunne det. Arket følger
+  // fingeren mens man trækker, og glider på plads ved slip: op åbner, ned lukker. Et
+  // tryk uden bevægelse håndteres af onClick som før. Et strøg efterfølges også af et
+  // click-event, som skal ignoreres, ellers skifter panelet straks tilbage igen.
+  // Selve placeringen og animationen ligger i CSS (.sidebar på smalle skærme); her sættes
+  // kun fingerens forskydning som --sheet-drag. Den sættes direkte på elementet, ikke
+  // via state: React skal ikke rendere 60 gange i sekundet under et træk.
+  const asideRef = useRef<HTMLElement>(null)
+  const toggleRef = useRef<HTMLButtonElement>(null)
+  const swipeStartY = useRef<number | null>(null)
+  const ignoreNextClick = useRef(false)
+  const SWIPE_THRESHOLD_PX = 30
+
+  // Højden på den synlige linje, til CSS'ens --sheet-peek. Målt, ikke hårdkodet: på en
+  // rigtig iPhone blev teksten større end i emulatoren. Sættes på forælderen, så kortet
+  // kan give plads til den lukkede linje.
+  useEffect(() => {
+    const toggle = toggleRef.current
+    const layout = asideRef.current?.parentElement
+    if (!toggle || !layout) return
+    const observer = new ResizeObserver(() => {
+      // offsetHeight er 0 på desktop, hvor linjen er skjult — så rør vi intet
+      if (toggle.offsetHeight > 0) {
+        layout.style.setProperty('--sheet-peek', `${toggle.offsetHeight}px`)
+      }
+    })
+    observer.observe(toggle)
+    return () => observer.disconnect()
+  }, [])
+
+  const setDrag = (px: number | null) => {
+    const aside = asideRef.current
+    if (!aside) return
+    if (px === null) {
+      aside.style.removeProperty('--sheet-drag')
+      aside.classList.remove('sidebar--dragging')
+    } else {
+      aside.style.setProperty('--sheet-drag', `${px}px`)
+      aside.classList.add('sidebar--dragging')
+    }
+  }
+
+  const handleTogglePointerDown = (e: React.PointerEvent) => {
+    swipeStartY.current = e.clientY
+    // Linjen er kun ~60 px høj, så et strøg slutter over kortet. Uden capture lander
+    // pointerup dér og ikke her — strøget blev aldrig registreret (målt med Playwright)
+    e.currentTarget.setPointerCapture(e.pointerId)
+  }
+  const handleTogglePointerMove = (e: React.PointerEvent) => {
+    if (swipeStartY.current === null) return
+    setDrag(e.clientY - swipeStartY.current)
+  }
+  const handleTogglePointerUp = (e: React.PointerEvent) => {
+    if (swipeStartY.current === null) return
+    const dy = e.clientY - swipeStartY.current
+    swipeStartY.current = null
+    // Fjern forskydningen og slå transitionen til i samme omgang: så glider arket fra
+    // hvor fingeren slap, til åbent eller lukket
+    setDrag(null)
+    if (Math.abs(dy) < SWIPE_THRESHOLD_PX) return  // et tryk — onClick klarer det
+    ignoreNextClick.current = true
+    setMobileOpen(dy < 0)  // op = åbn, ned = luk
+  }
+  const handleTogglePointerCancel = () => {
+    swipeStartY.current = null
+    setDrag(null)
+  }
+  const handleToggleClick = () => {
+    if (ignoreNextClick.current) {
+      ignoreNextClick.current = false
+      return
+    }
+    setMobileOpen((open) => !open)
+  }
 
   useEffect(() => {
     try {
@@ -183,8 +267,46 @@ export default function Sidebar({ routeInfo, elevation, routeError, showElevatio
 
   const visibleError = routeError ?? actionError
 
+  const summary = routeInfo
+    ? [
+        formatDistance(routeInfo.distance),
+        formatTime(travelSeconds(routeInfo.distance, speed)),
+        elevation ? `↑ ${Math.round(elevation.ascent)} m` : null,
+      ].filter(Boolean).join(' · ')
+    : 'Tryk på kortet for at starte'
+  // Uden en rute er der intet at opsummere — sig i stedet hvad menuen indeholder, så
+  // import og gemte ruter kan findes før man har tegnet noget
+  const emptyHint = 'Gem, hent og importér ruter'
+
   return (
-    <aside className="sidebar">
+    <aside ref={asideRef} className={`sidebar${mobileOpen ? ' sidebar--open' : ''}`}>
+      {/* Foldet sammen vises kun denne linje. Den skal *ligne* noget der kan trækkes op —
+          håndtag, skygge og en tydelig knap — ellers opdager man den ikke (Oskars test på
+          en rigtig iPhone, 18. okt. 2026). Fejl vises også her, så en routingfejl ikke
+          gemmer sig i et lukket panel. Hele linjen er trykflade, ikke kun knappen. */}
+      <button
+        ref={toggleRef}
+        className="sidebar-toggle"
+        onClick={handleToggleClick}
+        onPointerDown={handleTogglePointerDown}
+        onPointerMove={handleTogglePointerMove}
+        onPointerUp={handleTogglePointerUp}
+        onPointerCancel={handleTogglePointerCancel}
+        aria-expanded={mobileOpen}
+      >
+        <span className="sidebar-toggle-handle" aria-hidden="true" />
+        <span className="sidebar-toggle-text">
+          <span className={visibleError ? 'sidebar-toggle-error' : 'sidebar-toggle-summary'}>
+            {visibleError ?? summary}
+          </span>
+          {!visibleError && (
+            <span className="sidebar-toggle-hint">{routeInfo ? EDIT_TIP : emptyHint}</span>
+          )}
+        </span>
+        <span className="sidebar-toggle-button">{mobileOpen ? 'Luk ▾' : 'Menu ▴'}</span>
+      </button>
+
+      <div className="sidebar-body">
       <section className="sidebar-section">
         <h2>Rute</h2>
         {visibleError && <p className="sidebar-error">{visibleError}</p>}
@@ -230,6 +352,8 @@ export default function Sidebar({ routeInfo, elevation, routeError, showElevatio
               />
               <span className="speed-control-unit">km/t</span>
             </label>
+
+            <p className="sidebar-tip">{EDIT_TIP}</p>
           </>
         ) : (
           <p className="sidebar-hint">Klik på kortet for at starte en rute</p>
@@ -297,13 +421,6 @@ export default function Sidebar({ routeInfo, elevation, routeError, showElevatio
           <button className="btn btn-secondary" onClick={() => fileInputRef.current?.click()}>
             Importér GPX
           </button>
-          {/* Kun vejen tilbage: panelet lukkes med sit eget kryds, så to knapper
-              til samme ting ville stå og skifte plads i kolonnen */}
-          {elevation && !showElevation && (
-            <button className="btn btn-secondary" onClick={onToggleElevation}>
-              Vis højdeprofil
-            </button>
-          )}
           <button className="btn btn-danger" onClick={onClearRoute} disabled={!routeInfo}>
             Ryd rute
           </button>
@@ -332,6 +449,7 @@ export default function Sidebar({ routeInfo, elevation, routeError, showElevatio
           </ul>
         )}
       </section>
+      </div>
     </aside>
   )
 }

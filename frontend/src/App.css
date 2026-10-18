@@ -4,10 +4,18 @@
   box-sizing: border-box;
 }
 
+/* Appen fylder præcis det område browseren lader være synligt — med position: fixed og
+   inset: 0, ikke med en højde. Målt på en iPhone 16 Pro med iOS 26.5 (18. okt. 2026):
+   Safaris værktøjslinje svæver *over* siden i bunden, 100vh/100lvh var 754 px (ind under
+   linjen) mod 714 px synligt, og env(safe-area-inset-bottom) var 0 — også med
+   viewport-fit=cover. Et element med position: fixed; bottom: 0 lå derimod præcis over
+   linjen. Mobilpanelet var halvt dækket af Safari før dette.
+   Sæt ikke height her: med top + height ignoreres bottom. */
 .app {
+  position: fixed;
+  inset: 0;
   display: flex;
   flex-direction: column;
-  height: 100vh;
 }
 
 .app-header {
@@ -131,6 +139,30 @@
   min-width: 0;
   display: flex;
   flex-direction: column;
+  position: relative; /* anker for .elevation-show */
+}
+
+/* "Højdeprofil ▴" i kortets nederste venstre hjørne, når profilen er lukket — samme sted
+   som den forsvandt fra. Hjørnet er frit: zoom sidder øverst til venstre, OpenStreetMap-
+   kreditten nederst til højre. Over Leaflets panes (z-index op til 800). */
+.elevation-show {
+  position: absolute;
+  left: 12px;
+  bottom: 12px;
+  z-index: 1000;
+  background: #fff;
+  color: #212529;
+  border: none;
+  border-radius: 999px;
+  padding: 8px 14px;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  box-shadow: 0 1px 6px rgba(0, 0, 0, 0.3);
+  cursor: pointer;
+}
+.elevation-show:hover {
+  background: #f1f3f5;
 }
 
 /* Sidebar */
@@ -149,6 +181,15 @@
   border-bottom: 1px solid #dee2e6;
 }
 
+/* Fold-ud-linjen findes kun på smalle skærme (se media query nederst). På desktop er
+   den skjult, og .sidebar-body opfører sig som om den ikke fandtes. */
+.sidebar-toggle {
+  display: none;
+}
+.sidebar-body {
+  display: contents;
+}
+
 .sidebar-section h2 {
   font-size: 0.85rem;
   text-transform: uppercase;
@@ -160,6 +201,14 @@
 .sidebar-hint {
   color: #868e96;
   font-size: 0.9rem;
+}
+
+/* Lille, diskret tekst om hvordan man flytter og sletter punkter */
+.sidebar-tip {
+  color: #868e96;
+  font-size: 0.75rem;
+  line-height: 1.4;
+  margin-bottom: 12px;
 }
 
 .sidebar-error {
@@ -397,6 +446,11 @@
   flex: 1;
 }
 
+/* Tal og enhed må aldrig skilles ad ("52" på én linje, "m" på den næste) */
+.elevation-summary > span {
+  white-space: nowrap;
+}
+
 .elevation-ascent {
   color: #c2410c;
 }
@@ -602,6 +656,17 @@
   width: 7px;
   height: 7px;
 }
+/* Prikkerne er større på berøringsskærme (DOT_SIZE i RoutingControl.tsx) — pilen følger med */
+@media (pointer: coarse) {
+  .marker-arrow {
+    width: 12px;
+    height: 12px;
+  }
+  .midpoint-marker .marker-arrow {
+    width: 11px;
+    height: 11px;
+  }
+}
 
 /* Almindelige waypoints: fyldt = et rigtigt punkt */
 .waypoint-marker .marker-dot {
@@ -630,4 +695,220 @@
   border-style: solid;
   opacity: 1;
   transform: scale(1.3);
+}
+
+/* ---------------------------------------------------------------------------------
+   Telefoner. Kortet får hele bredden, og sidepanelet bliver et ark i bunden der kan
+   trækkes op. Med panelet i siden som på desktop var kortet 40 px bredt på en iPhone SE.
+   *Eller* lav skærm: en telefon på langs er bredere end 700 px (iPhone 16 Pro: 756) og
+   fik desktop-layoutet med et kort på 476×169. Det der gør den til en telefon, er at
+   den er lav. Tablets og desktop er aldrig under 500 px høje.
+   --------------------------------------------------------------------------------- */
+@media (max-width: 700px), (max-height: 500px) {
+  .app-header {
+    padding: 6px 12px;
+  }
+  .app-header h1 {
+    font-size: 1rem;
+  }
+  .app-header-user {
+    gap: 8px;
+    font-size: 0.8rem;
+  }
+  /* Undtaget fra 44 px-minimummet nedenfor — headeren skal forblive lav */
+  .app-header .btn {
+    min-height: 0;
+  }
+
+  /* Arket ligger 14 px ind over profilens bund (se .map-main) — giv plads, så
+     km-etiketterne ikke dækkes */
+  .elevation-panel {
+    padding-bottom: 18px;
+  }
+
+  /* Over arkets lukkede linje, ikke bag den (.map-main har padding-bottom til linjen,
+     men en absolut placering regnes fra kanten og ignorerer den) */
+  .elevation-show {
+    bottom: calc(var(--sheet-peek) - 14px + 20px);
+    min-height: 44px;
+  }
+
+  /* Min–max er det mindst vigtige af de tre tal og får ikke plads på en telefon */
+  .elevation-range {
+    display: none;
+  }
+
+  /* --sheet-peek er højden på arkets synlige linje, målt i Sidebar.tsx og sat her på
+     forælderen, så både kortet og arket kan bruge den. Målt i stedet for hårdkodet: på
+     en rigtig iPhone var teksten større end i emulatoren. 61px er kun en startværdi. */
+  .map-layout {
+    flex-direction: column;
+    position: relative;
+    --sheet-peek: 61px;
+  }
+  /* Kortet fylder hele højden, minus det stykke den lukkede linje dækker. De 14 px er
+     arkets afrundede hjørner, som skal vise kort bag sig. */
+  .map-main {
+    flex: 1;
+    min-height: 0;
+    padding-bottom: calc(var(--sheet-peek) - 14px);
+  }
+
+  /* Et "bottom sheet" som i Apple/Google Maps: hvid flade med afrundede hjørner og
+     skygge opad, der ligger *oven på* kortet. Den første udgave (grå linje med en lille
+     pil) blev ikke fundet på en rigtig iPhone.
+
+     Arket flyttes med transform, ikke ved at ændre kortets størrelse. Det kan animeres
+     glat (GPU, ingen ny layout pr. frame), og Leaflet skal ikke regne om undervejs.
+     Lukket: skubbet ned så kun linjen (--sheet-peek) ses. Åbent: 0. Under et træk
+     lægges fingerens forskydning (--sheet-drag) oveni, og clamp() holder arket mellem
+     helt åbent og helt lukket. 100% er arkets egen højde. */
+  .sidebar {
+    position: absolute;
+    left: 0;
+    right: 0;
+    bottom: 0;
+    width: auto;
+    border-right: none;
+    background: #fff;
+    border-radius: 14px 14px 0 0;
+    box-shadow: 0 -4px 16px rgba(0, 0, 0, 0.18);
+    overflow: visible;
+    /* Over Leaflets panes (z-index op til 800) *og* over højdeprofilen (1000) */
+    z-index: 1001;
+    /* Hold indholdet fri af iPhones home-indikator */
+    padding-bottom: env(safe-area-inset-bottom, 0px);
+
+    --sheet-closed: calc(100% - var(--sheet-peek));
+    --sheet-base: var(--sheet-closed);
+    transform: translateY(
+      clamp(0px, calc(var(--sheet-base) + var(--sheet-drag, 0px)), var(--sheet-closed))
+    );
+    /* Hurtig start, blød landing — som iOS' egne ark */
+    transition: transform 0.3s cubic-bezier(0.2, 0.8, 0.2, 1);
+  }
+  .sidebar--open {
+    --sheet-base: 0px;
+  }
+  /* Under et træk følger arket fingeren direkte — en transition ville få det til at
+     halte bagefter. Den slås til igen ved slip, så arket glider resten af vejen. */
+  .sidebar--dragging {
+    transition: none;
+  }
+
+  .sidebar-toggle {
+    position: relative;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    width: 100%;
+    /* Mindst 44 px høj — Apples minimum for et trykområde. Ekstra top til håndtaget. */
+    min-height: 56px;
+    padding: 18px 16px 10px;
+    background: none;
+    border: none;
+    font: inherit;
+    text-align: left;
+    color: #212529;
+    cursor: pointer;
+    /* Strøg på linjen er vores (åbn/luk) — ikke browserens scroll eller zoom. Uden
+       dette afbryder Safari strøget med pointercancel og tager det selv. */
+    touch-action: none;
+  }
+  /* Håndtaget — det velkendte "træk mig"-signal øverst på et ark */
+  .sidebar-toggle-handle {
+    position: absolute;
+    top: 7px;
+    left: 50%;
+    width: 36px;
+    height: 5px;
+    margin-left: -18px;
+    border-radius: 3px;
+    background: #ced4da;
+  }
+  .sidebar-toggle-text {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 2px;
+  }
+  /* Én linje hver, og "…" hvis der ikke er plads. På en rigtig iPhone 16 Pro skubbede
+     teksten Menu-knappen ud over højre kant i stedet for at ombryde — det må aldrig ske,
+     knappen er hele pointen med linjen. */
+  .sidebar-toggle-summary,
+  .sidebar-toggle-hint,
+  .sidebar-toggle-error {
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+  .sidebar-toggle-summary {
+    font-size: 0.95rem;
+    font-weight: 600;
+  }
+  .sidebar-toggle-hint {
+    font-size: 0.8rem;
+    color: #6c757d;
+  }
+  /* Undtagelsen fra én-linje-reglen ovenfor: tippet om at slette må fylde to linjer.
+     Med "…" forsvandt netop den del der forklarer sletning på en iPhone SE. Linjens
+     højde måles (--sheet-peek), så kortet giver selv plads. Højst to linjer. */
+  .sidebar-toggle-hint {
+    white-space: normal;
+    display: -webkit-box;
+    -webkit-box-orient: vertical;
+    -webkit-line-clamp: 2;
+    line-clamp: 2;
+    line-height: 1.3;
+  }
+  .sidebar-toggle-error {
+    color: #c92a2a;
+    font-size: 0.85rem;
+  }
+  /* Tydelig knap, så det er åbenlyst at linjen kan trykkes på */
+  .sidebar-toggle-button {
+    flex-shrink: 0;
+    background: #2563eb;
+    color: white;
+    font-size: 0.9rem;
+    font-weight: 600;
+    padding: 8px 14px;
+    border-radius: 999px;
+    white-space: nowrap;
+  }
+
+  /* Indholdet er altid til stede, så det kan glide ind — når arket er lukket, ligger
+     det under skærmkanten og klippes af .map-layout's overflow: hidden. Højst halvdelen
+     af skærmen, så kortet altid er synligt over det. */
+  .sidebar-body {
+    display: block;
+    max-height: 50dvh;
+    overflow-y: auto;
+    border-top: 1px solid #dee2e6;
+  }
+  /* Fejlen og tippet om at flytte/slette står allerede i linjen ovenover */
+  .sidebar-body .sidebar-error,
+  .sidebar-body .sidebar-tip {
+    display: none;
+  }
+
+  /* Større trykflader i panelet */
+  .btn {
+    min-height: 44px;
+  }
+  .route-item-delete {
+    min-width: 44px;
+    min-height: 44px;
+  }
+}
+
+/* Telefon på langs: header, kort, højdeprofil og ark kan ikke være på 352 px højde.
+   Profilen skjules — stigningen står allerede i arkets opsummeringslinje. Knappen der
+   viser den igen skjules også; den ville ikke gøre noget her. */
+@media (max-height: 500px) {
+  .elevation-panel,
+  .elevation-show {
+    display: none;
+  }
 }

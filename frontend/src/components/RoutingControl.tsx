@@ -26,7 +26,13 @@ const endIcon = L.divIcon({
   iconAnchor: FLAG_ANCHOR,
 })
 
-const DOT_SIZE = { waypoint: 16, midpoint: 14 } as const
+// Større på berøringsskærme: 16 px er let at ramme med en mus, men ikke med en finger.
+// pointer: coarse = primær input er unøjagtig (finger), uanset skærmstørrelse. Læses én
+// gang — en enhed skifter ikke primær input undervejs.
+const COARSE_POINTER = typeof window !== 'undefined' && window.matchMedia('(pointer: coarse)').matches
+const DOT_SIZE = COARSE_POINTER
+  ? { waypoint: 24, midpoint: 22 }
+  : { waypoint: 16, midpoint: 14 }
 
 // Pilen viser rutens retning, så man kan skelne ud- og hjemtur på samme vej.
 // Den peger opad i SVG'en og drejes på selve pilen — aldrig på rod-elementet.

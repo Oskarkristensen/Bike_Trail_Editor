@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useMemo, useRef, useState } from 'react'
 import { MapContainer, TileLayer } from 'react-leaflet'
 import type { Map as LeafletMap } from 'leaflet'
 import 'leaflet/dist/leaflet.css'
@@ -31,11 +31,21 @@ export default function Map() {
   )
   const elevationVisible = showElevation && elevation !== null
 
-  // Kortet bliver lavere når panelet dukker op. Uden invalidateSize regner
-  // Leaflet stadig med den gamle højde og efterlader et gråt bånd uden fliser.
-  useEffect(() => {
-    mapRef.current?.invalidateSize()
-  }, [elevationVisible])
+  // Leaflet opdager kun selv når *vinduet* ændrer størrelse, ikke når containeren gør.
+  // Den ændrer sig når højdeprofilen vises/skjules, når mobilpanelet foldes ud/ind, og
+  // når telefonen drejes. Uden invalidateSize regner Leaflet med den gamle størrelse og
+  // efterlader et gråt bånd uden fliser. Én observer dækker alle tilfælde.
+  const resizeObserverRef = useRef<ResizeObserver | null>(null)
+  const setMap = useCallback((map: LeafletMap | null) => {
+    mapRef.current = map
+    resizeObserverRef.current?.disconnect()
+    resizeObserverRef.current = null
+    if (map) {
+      const observer = new ResizeObserver(() => map.invalidateSize())
+      observer.observe(map.getContainer())
+      resizeObserverRef.current = observer
+    }
+  }, [])
 
   const handleHoverPoint = useCallback((point: { lat: number; lng: number } | null) => {
     routingRef.current?.highlightPoint(point)
@@ -88,8 +98,6 @@ export default function Map() {
         routeInfo={routeInfo}
         elevation={elevation}
         routeError={routeError}
-        showElevation={showElevation}
-        onToggleElevation={() => setShowElevation((visible) => !visible)}
         onClearRoute={handleClearRoute}
         onSaveRoute={handleSaveRoute}
         onLoadRoute={handleLoadRoute}
@@ -98,7 +106,7 @@ export default function Map() {
       />
       <div className="map-main">
         <MapContainer
-          ref={mapRef}
+          ref={setMap}
           center={AARHUS_CENTER}
           zoom={DEFAULT_ZOOM}
           style={{ flex: 1, minHeight: 0 }}
@@ -113,6 +121,15 @@ export default function Map() {
             onRouteError={setRouteError}
           />
         </MapContainer>
+        {/* Vejen tilbage til en lukket højdeprofil — samme sted som den forsvandt fra.
+            Lå før som knap nr. 6 i sidepanelet; på en telefon skulle man åbne menuen og
+            scrolle i den, og den blev ikke fundet. Uden for MapContainer, så et tryk
+            aldrig lander på kortet som et nyt waypoint. */}
+        {elevation && !showElevation && (
+          <button className="elevation-show" onClick={() => setShowElevation(true)}>
+            Højdeprofil ▴
+          </button>
+        )}
         {elevation && elevationVisible && (
           <ElevationProfileChart
             profile={elevation}

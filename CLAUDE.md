@@ -156,14 +156,103 @@ linjen.
     forvrænget.
   - **Y-aksen tvinges op på mindst 20 meters spænd** (`MIN_ELEVATION_RANGE_M`). Uden det
     ville en flad rute fylde hele grafen med et par meters SRTM-støj og ligne en bjergetape.
-- **Panelet ligger i `.map-main` under kortet, og `invalidateSize()` kaldes når det vises
-  eller skjules** (`useEffect` i `Map.tsx`). Leaflet opdager ikke selv at containeren blev
-  lavere og efterlader et gråt bånd uden fliser.
+- **Højdeprofilen ligger i `.map-main` under kortet, og en `ResizeObserver` på kortets
+  container kalder `invalidateSize()`** (`setMap` i `Map.tsx`). Leaflet opdager kun selv
+  når *vinduet* ændrer størrelse, ikke containeren, og efterlader ellers et gråt bånd uden
+  fliser. Observeren dækker profilen der vises/skjules, mobilarket og en telefon der
+  drejes. Den erstattede en `useEffect` der kun reagerede på profilen.
 - **Hover-markøren er en `L.circleMarker` med `interactive: false`** — den er ikke et
   waypoint, må ikke kunne trækkes eller klikkes, og skal ikke stjæle klik fra kortet.
   Den fjernes både når ruten forsvinder (`dropRouteLine`, `clearAll`) og når profilpanelet
   lukkes mens musen står inde i grafen (cleanup i `ElevationProfile`), hvor `pointerleave`
   aldrig når at blive kaldt.
+
+## Mobil
+
+Lavet 18. oktober 2026, testet med Playwright (iPhone SE/16 Pro, Pixel 7, Galaxy S24,
+Z Fold 7, iPads, landskab) og af Oskar på en rigtig **iPhone 16 Pro med iOS 26.5**. Al CSS
+ligger i `@media (max-width: 700px), (max-height: 500px)` nederst i `App.css`; desktop er
+uændret og eftervist med samme mål før og efter.
+
+- **Telefonlayout = smal *eller* lav skærm.** En telefon på langs er bredere end 700 px
+  (iPhone 16 Pro: 756) og fik desktop-layoutet med et kort på 476×169. Det der gør den
+  til en telefon er at den er lav; tablets og desktop er aldrig under 500 px høje. På
+  lave skærme skjules højdeprofilen helt — stigningen står i arkets opsummering.
+  iPad (gen 11) og Galaxy Tab S9 er smallere end 700 og får telefonlayoutet — bevidst,
+  det giver dem et kort på ~650×700 i stedet for ~370 px bredt ved siden af panelet.
+- **Sidepanelet er et "bottom sheet" oven på kortet** (Apple/Google Maps-mønsteret):
+  hvid flade, afrundede hjørner, skygge, håndtag og en blå "Menu ▴"-knap. **Den første
+  udgave — en grå linje med en lille pil — blev ikke fundet** på en rigtig iPhone ("if you
+  dont know it is there, there is no way to find it"). Uden rute siger linjen hvad menuen
+  indeholder (gem, hent, importér), så de kan findes før man har tegnet noget.
+- **Arket flyttes med `transform`, ikke ved at ændre kortets størrelse.** Det animeres på
+  GPU'en, og Leaflet skal ikke regne om undervejs. Lukket er det skubbet ned så kun linjen
+  ses (`--sheet-peek`), åbent er det ved 0. Fingerens forskydning lægges oveni som
+  `--sheet-drag`, og `clamp()` holder det mellem åbent og lukket. Alt i CSS; JS sætter kun
+  de to variabler.
+- **Under et træk følger arket fingeren** (`.sidebar--dragging` slår transitionen fra),
+  og ved slip glider det på plads: op åbner, ned lukker, under 30 px er et tryk. Målt:
+  626 → 466 → 399 → 369 → 362 px over 400 ms. `--sheet-drag` sættes direkte på elementet,
+  ikke via state, så React ikke renderer 60 gange i sekundet.
+- **`setPointerCapture` på `pointerdown` er nødvendig.** Linjen er ~60 px høj, så et
+  strøg slutter over kortet, og uden capture lander `pointerup` dér. Strøget blev aldrig
+  registreret før det kom på (fanget af Playwright, ikke af en bruger).
+- **`touch-action: none` på linjen**, ellers tager Safari strøget som scroll og afbryder
+  med `pointercancel`.
+- **`--sheet-peek` måles** med en `ResizeObserver` på linjen og sættes på `.map-layout`,
+  så kortet kan give plads. Ikke hårdkodet: emulatoren gav 63 px, og på den rigtige
+  iPhone var teksten større. Teksten i linjen afkortes med "…" — på iPhonen skubbede den
+  ellers Menu-knappen ud over højre kant.
+- **Arket har `z-index: 1001`, profilen 1000.** Med ens z-index vandt profilen, fordi den
+  kommer senere i HTML'en, og dækkede arkets top — håndtag og skygge forsvandt.
+- **Et tip forklarer sletning og træk** (`EDIT_TIP` i `Sidebar.tsx`), fordi højreklik og
+  langt tryk ikke er til at gætte. Teksten følger `pointer: coarse` ("Hold fingeren på et
+  punkt…" / "Højreklik på et punkt…"). Desktop: under hastigheden. Telefon: i arkets
+  linje, så den ses uden at åbne noget. **Sletning står først**, og tippet må fylde to
+  linjer (`line-clamp: 2`) — med "…" forsvandt netop sletnings-delen på en iPhone SE.
+- **En lukket højdeprofil vises igen med "Højdeprofil ▴" i kortets nederste venstre
+  hjørne** (`.elevation-show` i `Map.tsx`) — samme sted som den forsvandt fra, på både
+  desktop og telefon. Knappen lå før som nr. 6 i sidepanelets knapkolonne; på en telefon
+  skulle man åbne menuen *og* scrolle i den, og Oskar fandt den ikke ("you cant get it
+  back"). Den ligger uden for `MapContainer`, så et tryk aldrig bliver et waypoint, og
+  skjules på lave skærme, hvor profilen alligevel er skjult.
+- **Større markører på berøringsskærme** (`pointer: coarse` → 24/22 px i stedet for
+  16/14, pilen følger med i CSS) og knapper på mindst 44 px.
+- **Højdeprofilen er 100 px høj under 500 px bredde, og antallet af km-etiketter følger
+  bredden** (højst 5 som før). Med fast 5 skrev de oven i hinanden ("2,04,0km").
+
+### iOS 26 Safari — målt, ikke gættet
+
+Safaris værktøjslinje i bunden **svæver oven på siden** i iOS 26 (glas-effekt), i stedet
+for at tage plads fra den. Målt med en midlertidig målside på en iPhone 16 Pro, iOS 26.5:
+
+| Mål | Værdi |
+|---|---|
+| `innerHeight`, `100dvh`, `100svh` | 714 |
+| `100vh`, `100lvh` | 754 (ind under linjen) |
+| `env(safe-area-inset-bottom)` | **0 — også med `viewport-fit=cover`** |
+| `position: fixed; bottom: 0` | lå præcis over linjen ✓ |
+
+Derfor er **`.app` `position: fixed; inset: 0`** og ikke `height: 100dvh`. Det
+"sædvanlige" fix (`viewport-fit=cover` + `env(safe-area-inset-bottom)`) virker **ikke** på
+iOS 26 — værdien er 0. Sæt heller ikke `height` på `.app`: med `top` + `height` ignoreres
+`bottom`.
+
+**Konsekvens: Safaris linje skrumper aldrig.** Den gør det kun når *siden* scroller, og
+appen fylder skærmen præcis. Det er accepteret — som Apple/Google Maps på web.
+
+### Teste på mobil
+
+- **Playwright** (`playwright` som devDependency i roden, kun WebKit og Chromium
+  installeret) til skærmbilleder og mål på emulerede enheder. Scripts skrives i
+  scratchpad, ikke som en testsuite — se "Hobbyprojekt" i hukommelsen. Login via
+  `context.request` mod API'et; testbrugere oprettes på `test` og slettes bagefter.
+- **Emulering viser ikke Safaris egen værktøjslinje** og ikke hvordan træk med en finger
+  *føles*. Begge dele krævede den rigtige telefon.
+- **Rigtig telefon på hjemmenettet:** start frontenden med
+  `npm run dev --prefix frontend -- --host` og åbn `http://<Mac'ens IP>:5173` på telefonen
+  (`ipconfig getifaddr en0`). macOS' firewall kan spørge om node må tage imod forbindelser.
+  Skærmbilleder fra telefonen lægges i `screenshots/`, som er gitignoreret.
 
 ## Lokale adgangsbegrænsninger
 
@@ -212,8 +301,10 @@ Færdigt:
 - Brugerkonti: login og oprettelse med invitationskode, ruter pr. bruger (fase 2–4)
 - **I produktion på https://bike-trail-editor.onrender.com** (Render + Neon `main`, fase 5)
 
+- Mobillayout med et ark der kan trækkes op fra bunden (se "Mobil")
+
 Ikke implementeret endnu:
-- Mobiloptimering
+- Intet planlagt
 
 ## Migreringsplan: brugerkonti (Neon Postgres + eget login med invitationskode)
 
